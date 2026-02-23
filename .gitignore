@@ -1,0 +1,26 @@
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+.env
+.pytest_cache/
+
+# Jarvis Data
+data/
+*.log
+logs/
+*.pid
+
+# WhisperKit local model cache/artifacts
+models/whisperkit/
+**/whisperkit/
+
+# macOS
+.DS_Store
+
+# Swift / Xcode / SPM
+JarvisApp/.build/
+DerivedData/
