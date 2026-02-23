@@ -7,6 +7,7 @@ venv/
 .venv/
 .env
 .pytest_cache/
+.cache
 
 # Jarvis Data
 data/
@@ -23,4 +24,6 @@ models/whisperkit/
 
 # Swift / Xcode / SPM
 JarvisApp/.build/
+JarvisApp/.swiftpm/
+*.xcuserstate
 DerivedData/
