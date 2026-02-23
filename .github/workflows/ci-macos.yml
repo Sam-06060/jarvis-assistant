@@ -18,8 +18,12 @@ jobs:
 
       - name: Install dependencies
         run: |
+          brew install portaudio
           python -m pip install --upgrade pip setuptools wheel
+          export LDFLAGS="-L$(brew --prefix portaudio)/lib"
+          export CPPFLAGS="-I$(brew --prefix portaudio)/include"
           pip install -r requirements-dev.txt
+
 
       - name: Create .env for CI
         run: |
