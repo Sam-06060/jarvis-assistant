@@ -14,7 +14,7 @@ This repo now includes a deterministic setup path so a fresh clone can run after
 
 ## 1) Clone
 ```bash
-git clone <your-repo-url>
+git clone <[your-repo-url](https://github.com/Sam-06060/jarvis-assistant.git)>
 cd jarvis-assistant
 ```
 
