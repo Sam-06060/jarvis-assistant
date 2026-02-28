@@ -8,22 +8,36 @@ venv/
 .env
 .pytest_cache/
 .cache
+*.egg-info/
 
-# Jarvis Data
+# Jarvis Runtime Data
 data/
 *.log
 logs/
 *.pid
+macros/
 
 # WhisperKit local model cache/artifacts
 models/whisperkit/
 **/whisperkit/
 
+# Temporary/generated files
+partial_temp.*
+
+# Archives (don't commit binary blobs)
+*.zip
+
 # macOS
 .DS_Store
+Thumbs.db
+
+# IDE / Editor
+.VSCodeCounter/
+.vscode/
+.idea/
+*.xcuserstate
 
 # Swift / Xcode / SPM
 JarvisApp/.build/
 JarvisApp/.swiftpm/
-*.xcuserstate
 DerivedData/

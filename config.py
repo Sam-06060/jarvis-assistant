@@ -67,9 +67,9 @@ CONTACTS_FILE = os.path.join(DATA_DIR, "contacts.json")
 PERSONA_FILE = os.path.join(DATA_DIR, "persona.txt")
 
 
-# ============== PERFORMANCE OPTIMIZATIONS (M4 GOD MODE) ==============
+# ============== PERFORMANCE OPTIMIZATIONS ==============
 
-# ============== VOICE ENGINE SETTINGS (ULTRA-FAST) ==============
+# ============== VOICE ENGINE SETTINGS ==============
 # NEW: Custom Voice Engine with Apple Speech Recognition
 USE_APPLE_SPEECH = True  # Use native macOS Speech Recognition (<200ms latency!)
 APPLE_SPEECH_ON_DEVICE = True  # Force on-device processing (privacy + speed)
@@ -80,7 +80,7 @@ WHISPER_MODEL_SIZE = "base"  # Options: tiny, base, small, medium, large
 WHISPER_DEVICE = "cpu"       # M4 CPU is faster than GPU for Whisper
 WHISPER_COMPUTE_TYPE = "int8"  # Quantization for speed
 
-# ============== COOLING OPTIMIZATIONS ==============
+# ============== LAZY LOADING ==============
 LAZY_LOAD_WHISPER = True       # Don't load Whisper at startup; load on first Apple Speech failure
 LAZY_LOAD_CURSOR = True        # Don't load MediaPipe at startup; load on "cursor control" command
 
@@ -141,11 +141,9 @@ CLICK_THRESHOLD = 10     # Tighter pinch required (was 30)
 CLICK_COOLDOWN = 0.5     # Seconds before next click possible
 
 # ============== PROXIMITY SECURITY ==============
-# ============== PROXIMITY SECURITY ==============
 ENABLE_PROXIMITY_LOCK = True
 PHONE_MAC_ADDRESS = os.getenv("PHONE_MAC_ADDRESS")
 
-# ============== FACE ID ==============
 # ============== FACE ID ==============
 ENABLE_FACE_ID = True # <--- Master Toggle for Face ID Animation & Check
 REFERENCE_IMAGE_PATH = os.getenv("REFERENCE_IMAGE_PATH", os.path.join(DATA_DIR, "me.jpg"))
@@ -156,25 +154,23 @@ OLLAMA_MODEL = "llama3.2" # 3B Model (Cool & Fast)
 
 # ============== GROQ CONFIG (Cloud Code Generation) ==============
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-# GROQ_MODEL = "qwen/qwen3-32b"  # COMMENTED: Replaced by OpenRouter StepFun
-GROQ_MODEL = "qwen/qwen3-32b"  # Still used as fallback
+GROQ_MODEL = "qwen/qwen3-32b"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MAX_TOKENS = 8192
 GROQ_INTENT_MODEL = "llama-3.3-70b-versatile"  # Fast, smart model for Intent Analysis
 
-# ============== CLOUD-FIRST CONVERSATION (Zero Heat Mode ❄️) ==============
+# ============== CLOUD-FIRST CONVERSATION ==============
 CLOUD_FIRST_CONVERSATION = True  # Route general conversation through Groq cloud
-GROQ_CONVERSATION_MODEL = "llama-3.3-70b-versatile"  # Powerful 70B — runs on Groq's cloud, not your Mac
-GROQ_CONVERSATION_TIMEOUT = 15  # Fast fail — fallback to Ollama if cloud is slow
+GROQ_CONVERSATION_MODEL = "llama-3.3-70b-versatile"
+GROQ_CONVERSATION_TIMEOUT = 15  # Fallback to Ollama if cloud is slow
 
 # ============== OPENROUTER CONFIG (Primary Code Generation) ==============
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = "stepfun/step-3.5-flash:free"  # User requested StepFun
+OPENROUTER_MODEL = "stepfun/step-3.5-flash:free"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-OPENROUTER_MAX_TOKENS = 32000  # Conservative limit
+OPENROUTER_MAX_TOKENS = 32000
 
-# ============== GEMINI CONFIG (Complex/Cloud) ==============
-# GEMINI_API_KEY = "" 
-# GEMINI_MODEL = "gemini-2.0-flash" 
-# (DISABLED BY USER REQUEST - BACK TO LOCAL OLLAMA)
+# ============== GEMINI CONFIG (Optional) ==============
+# GEMINI_API_KEY = ""
+# GEMINI_MODEL = "gemini-2.0-flash"
 DEV_MODE = False

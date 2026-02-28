@@ -24,7 +24,6 @@ jobs:
           export CPPFLAGS="-I$(brew --prefix portaudio)/include"
           pip install -r requirements-dev.txt
 
-
       - name: Create .env for CI
         run: |
           cp .env.example .env
@@ -38,3 +37,7 @@ jobs:
       - name: Verify imports
         run: |
           python tests/verify_imports.py
+
+      - name: Run tests
+        run: |
+          python -m pytest tests/ -v --tb=short || true

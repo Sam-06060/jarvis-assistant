@@ -1,5 +1,0 @@
-cd ~/Desktop/jarvis-assistant
-pip3 install -r requirements.txt
-
-
-

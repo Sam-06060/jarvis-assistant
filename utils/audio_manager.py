@@ -6,10 +6,10 @@ import time
 # Define the paths to your sound effects here.
 # Ensure these files exist in your 'assets' folder.
 SOUND_MAP = {
-    "listening": "assets/listening.wav",   # Quick "Ping"
-    "processing": "assets/processing.wav", # "Computing" Hum
-    "success": "assets/success.wav",       # "Ding"
-    "error": "assets/error.wav",           # "Thud"
+    "listening": "assets/sounds/listening.wav",   # Quick "Ping"
+    "processing": "assets/sounds/processing.wav", # "Computing" Hum
+    "success": "assets/sounds/success.wav",       # "Ding"
+    "error": "assets/sounds/error.wav",           # "Thud"
     "idle": "/System/Library/Sounds/Pop.aiff",
     "interrupt": "/System/Library/Sounds/Funk.aiff"
 }
