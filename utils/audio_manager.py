@@ -7,7 +7,6 @@ import time
 # Ensure these files exist in your 'assets' folder.
 SOUND_MAP = {
     "listening": "assets/sounds/listening.wav",   # Quick "Ping"
-    "processing": "assets/sounds/processing.wav", # "Computing" Hum
     "success": "assets/sounds/success.wav",       # "Ding"
     "error": "assets/sounds/error.wav",           # "Thud"
     "idle": "/System/Library/Sounds/Pop.aiff",
