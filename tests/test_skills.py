@@ -110,5 +110,75 @@ class TestSkills(unittest.TestCase):
         self.assertTrue(skill.handle("Please summarize this: Jarvis is an AI assistant that helps with commands."))
         self.mock_context['brain'].ask.assert_called()
 
+    # ==== NEW: Lock Screen Tests ====
+    def test_lock_screen_direct(self):
+        skill = SystemSkill(self.mock_context)
+        self.assertTrue(skill.can_handle("lock screen"))
+        self.assertTrue(skill.can_handle("lock"))
+        self.assertTrue(skill.can_handle("screen off"))
+        self.assertTrue(skill.can_handle("lock my computer"))
+    
+    def test_lock_screen_nlp(self):
+        skill = SystemSkill(self.mock_context)
+        self.assertTrue(skill.can_handle("brb"))
+        self.assertTrue(skill.can_handle("be right back"))
+        self.assertTrue(skill.can_handle("stepping away"))
+        self.assertTrue(skill.can_handle("i am going now but will come in a minute"))
+        self.assertTrue(skill.can_handle("take a break"))
+        self.assertTrue(skill.can_handle("going away"))
+
+    # ==== NEW: Shutdown NLP Tests ====
+    def test_shutdown_nlp(self):
+        skill = InteractionSkill(self.mock_context)
+        # Direct triggers should work
+        self.assertTrue(skill.can_handle("shut down"))
+        self.assertTrue(skill.can_handle("shutdown"))
+        self.assertTrue(skill.can_handle("power off"))
+        self.assertTrue(skill.can_handle("terminate"))
+        # NLP phrases
+        self.assertTrue(skill.can_handle("i'm done"))
+        self.assertTrue(skill.can_handle("call it a day"))
+        self.assertTrue(skill.can_handle("done for now"))
+        self.assertTrue(skill.can_handle("time to go"))
+        self.assertTrue(skill.can_handle("wrap it up"))
+        self.assertTrue(skill.can_handle("end session"))
+        # Handle should return EXIT
+        self.assertEqual(skill.handle("shut down"), "EXIT")
+        self.assertEqual(skill.handle("i'm done"), "EXIT")
+        self.assertEqual(skill.handle("call it a day"), "EXIT")
+
+    # ==== NEW: Volume NLP Tests ====
+    def test_volume_nlp_word_to_number(self):
+        from modules.skills.system_skill import _parse_number_from_text
+        # Direct digits
+        self.assertEqual(_parse_number_from_text("set volume to 50"), 50)
+        # Word numbers
+        self.assertEqual(_parse_number_from_text("set volume to fifty"), 50)
+        self.assertEqual(_parse_number_from_text("set volume to uno"), 1)
+        # One hundred (the specific bug)
+        self.assertEqual(_parse_number_from_text("set volume to one hundred"), 100)
+        # Compound
+        self.assertEqual(_parse_number_from_text("set volume to twenty five"), 25)
+        # Descriptive
+        self.assertEqual(_parse_number_from_text("set volume to max"), 100)
+        self.assertEqual(_parse_number_from_text("set volume to half"), 50)
+        self.assertEqual(_parse_number_from_text("set volume to full"), 100)
+    
+    def test_volume_nlp_intent(self):
+        skill = SystemSkill(self.mock_context)
+        self.assertTrue(skill.can_handle("make it louder"))
+        self.assertTrue(skill.can_handle("make it quieter"))
+        self.assertTrue(skill.can_handle("turn it up"))
+        self.assertTrue(skill.can_handle("turn it down"))
+        self.assertTrue(skill.can_handle("unmute"))
+        self.assertTrue(skill.can_handle("mute"))
+
+    # ==== NEW: Brightness Fix Test ====
+    def test_brightness_word_to_number(self):
+        from modules.skills.system_skill import _parse_number_from_text
+        # Should parse brightness number correctly
+        self.assertEqual(_parse_number_from_text("set brightness to 50"), 50)
+        self.assertEqual(_parse_number_from_text("set brightness to seventy"), 70)
+
 if __name__ == '__main__':
     unittest.main()

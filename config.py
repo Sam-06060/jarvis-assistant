@@ -11,7 +11,7 @@ USER_NAME = os.getenv("USER_NAME", "Sir")
 PICOVOICE_API_KEY = os.getenv("PICOVOICE_API_KEY")
 
 # Wake Words
-EXIT_WORDS = ["exit", "quit", "goodbye", "bye jarvis", "shutdown"]
+EXIT_WORDS = ["exit", "quit", "goodbye", "bye jarvis", "shutdown", "shut down", "power off", "terminate", "bye"]
 STOP_WORDS = ["stop", "quiet", "enough", "that's all", "never mind", "cancel", "standby"]
 
 # macOS Applications

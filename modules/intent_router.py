@@ -35,6 +35,8 @@ class IntentRouter:
         "music", "play", "pause", "volume", "brightness",
         "battery", "translate", "calculate", "stop", "exit",
         "shut down", "sleep", "cursor control", "shortcut",
+        "lock", "lock screen", "mute", "unmute", "louder", "quieter",
+        "brb", "stepping away", "going away",
     ]
 
     def analyze(self, command: str, previous_project_path: str = None) -> dict:

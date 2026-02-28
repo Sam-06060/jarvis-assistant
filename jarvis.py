@@ -452,6 +452,12 @@ class JarvisApp:
             "what time", "what's the time", "whats the time",
             "turn on", "turn off", "switch on", "switch off",
             "close ", "quit ", "exit", "shut down", "shutdown",
+            "lock", "lock screen", "screen off", "brb", "stepping away",
+            "going away", "i'm going", "i am going",
+            "mute", "unmute", "make it louder", "make it quieter",
+            "turn it up", "turn it down",
+            "i'm done", "done for now", "wrap it up", "call it a day",
+            "time to go", "end session",
             "start recording", "stop recording",
         ]
         if any(q_lower.startswith(ns) for ns in no_search_starts):

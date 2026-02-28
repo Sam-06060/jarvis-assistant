@@ -293,6 +293,26 @@ class CommandProcessor:
         cmd = command_text.lower()
         intent = str(intent_data.get("intent", "")).upper()
 
+        # --- LOCK SCREEN INTENT ---
+        if re.search(r"\block\b|\bscreen\s+off\b|\bdisplay\s+off\b", cmd):
+            return {"skill": "SystemSkill", "command": command_text, "reason": "lock_screen_intent"}
+        if re.search(r"\b(?:brb|be\s+right\s+back|stepping\s+away|going\s+away|take\s+a\s+break)\b", cmd):
+            return {"skill": "SystemSkill", "command": command_text, "reason": "lock_screen_nlp"}
+        if re.search(r"\bi\s*(?:am|'m)\s+going\b.*\b(?:back|minute|bit|moment|while|sec)\b", cmd):
+            return {"skill": "SystemSkill", "command": command_text, "reason": "lock_screen_nlp_going"}
+
+        # --- SHUTDOWN / EXIT INTENT ---
+        if re.search(r"\bshut\s*down\b|\bpower\s+off\b|\bterminate\b|\blog\s+off\b|\bsign\s+off\b", cmd):
+            return {"skill": "InteractionSkill", "command": command_text, "reason": "shutdown_nlp"}
+        if re.search(r"\bi'?m\s+done\b|\bdone\s+for\s+(?:now|today)\b|\bcall\s+it\s+a\s+day\b|\bwrap\s+(?:it\s+)?up\b|\bend\s+session\b|\btime\s+to\s+go\b", cmd):
+            return {"skill": "InteractionSkill", "command": command_text, "reason": "shutdown_nlp_phrase"}
+
+        # --- VOLUME NLP INTENT (no "volume" keyword) ---
+        if re.search(r"\bmake\s+it\s+(?:louder|quieter|softer|loud|silent)\b|\bturn\s+(?:it\s+)?(?:up|down)\b", cmd):
+            return {"skill": "SystemSkill", "command": command_text, "reason": "volume_nlp_intent"}
+        if re.search(r"\b(?:unmute|full\s+volume|max\s+volume)\b", cmd):
+            return {"skill": "SystemSkill", "command": command_text, "reason": "volume_nlp_intent"}
+
         # Cursor control activation using natural phrasing variants.
         if re.search(r"\b(?:turn|switch|start|enable|activate|open)\b.*\b(?:cursor|mouse)\s+control\b(?:.*\bmodule\b)?", cmd):
             return {"skill": "AutomationSkill", "command": "cursor control", "reason": "cursor_control_activation"}
