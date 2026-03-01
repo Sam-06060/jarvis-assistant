@@ -8,9 +8,7 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-green.svg)](LICENSE)
 [![Issues](https://img.shields.io/badge/Issues-Report-red)](https://github.com/Sam-06060/jarvis-assistant/issues)
 
-<p align="center">
-  <img src="https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExbmpsZnlyNDM5M3R4eDNweWp6cDN4dzE2cnNudXV5c2Rvcmlwc3lxZSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/3o7TKSjRrfIPjeiVyM/giphy.gif" alt="Jarvis HUD UI" width="600"/>
-</p>
+
 
 Jarvis is a powerful, extensible, and privacy-focused AI assistant built natively for macOS. It combines an ultra-fast local voice engine, on-device biometric security, and a local-first LLM brain to deliver an "Iron Man" style assistant experience. Featuring a robust Python backend and a native Swift UI desktop client connected via a Socket API, Jarvis executes highly complex "Nuclear" skills—from autonomously bootstrapping entire codebases to mimicking physical workflows. Your AI, your machine.
 
