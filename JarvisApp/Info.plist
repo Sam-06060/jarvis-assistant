@@ -6,6 +6,8 @@
     <string>JustJarvis</string>
     <key>CFBundleIdentifier</key>
     <string>com.jarvis.assistant</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleName</key>
     <string>Jarvis</string>
     <key>CFBundlePackageType</key>
