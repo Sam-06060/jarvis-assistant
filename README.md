@@ -1,4 +1,4 @@
-# 🧞‍♂️ Jarvis
+# Jarvis
 
 ### Production-Ready Local AI Assistant Stack for macOS
 
