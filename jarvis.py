@@ -385,7 +385,7 @@ class JarvisApp:
                 if result == "INTERRUPTED":
                     active_conversation = False
                     continue
-                active_conversation = self._handle_command_result(result, command, commander, brain, speech, web_search=web_search)
+                active_conversation = self._handle_command_result(result, command, commander, brain, speech, web_search=web_search, original_volume=original_volume)
             
             if original_volume is not None:
                     time.sleep(0.5) # Wait for speech to fully finish before restoring media
@@ -569,15 +569,17 @@ class JarvisApp:
         if result == "INTERRUPTED":
             self._update_hud("IDLE", "Interrupted")
             return
-        self._handle_command_result(result, command, commander, brain, ServiceRegistry.get("speech"), web_search=web_search)
+        self._handle_command_result(result, command, commander, brain, ServiceRegistry.get("speech"), web_search=web_search, original_volume=None)
         self._update_hud("IDLE", "Standing By")
 
-    def _handle_command_result(self, result, command_text, commander, brain, speech, web_search=False):
+    def _handle_command_result(self, result, command_text, commander, brain, speech, web_search=False, original_volume=None):
         """
         Interprets return value from CommandProcessor.
         Returns: Boolean (True = Continue Conversation, False = Stop)
         """
         if result == "EXIT":
+            if original_volume is not None:
+                restore_audio(original_volume)
             self.stop()
             sys.exit(0)
             

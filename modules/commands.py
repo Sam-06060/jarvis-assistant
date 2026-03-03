@@ -252,7 +252,12 @@ class CommandProcessor:
                     cmd_words = cmd.split()
                     match_words = matched_phrase.split()
                     
-                    if len(cmd_words) > len(match_words) and cmd_words[0] == match_words[0]:
+                    # Protection 1: Prefix matching (e.g. "execute meow")
+                    is_prefix_match = len(cmd_words) > len(match_words) and cmd_words[0] == match_words[0]
+                    # Protection 2: Play commands shouldn't be overridden if they have parameters
+                    is_play_param = cmd_words[0] == "play" and len(cmd_words) > 1 and cmd_words != match_words and matched_phrase in ["play music", "play some music", "play a random song"]
+
+                    if is_prefix_match or is_play_param:
                         print(f"🛡️ Protected parameterized command from fuzzy stripping: '{cmd}'")
                     else:
                         print(f"✨ Fuzzy Match: '{cmd}' -> '{matched_phrase}'")

@@ -5,6 +5,15 @@ import subprocess
 import time
 
 class MusicSkill(Skill):
+    def get_phrases(self) -> list:
+        return [
+            "play some music", "play a random song", "play music", "music",
+            "next track", "skip track", "previous track", "go back",
+            "pause music", "stop music", "resume music", "continue music",
+            "shuffle my playlist", "play on spotify", "play on apple music",
+            "what is playing", "what song is this"
+        ]
+
     def can_handle(self, command: str) -> bool:
         cmd = command.lower()
         triggers = ["music", "song", "spotify", "track", "play", "playing", "next", "previous", "skip", "pause", "resume", "shuffle"]

@@ -46,9 +46,8 @@ class MusicController:
                 subprocess.run(["open", "-a", "Spotify"])
                 time.sleep(1) # Wait for launch
                 
-                # Dynamic Search & Auto-Play (Brute Force)
-                # 1. Construct specific query
-                # If " by " in song, we can make it stricter
+                # Dynamic Search & Auto-Play via AppleScript Native Play
+                # Construct specific query. If " by " in song, make it stricter
                 query = song
                 if " by " in song:
                     parts = song.split(" by ")
@@ -56,38 +55,33 @@ class MusicController:
                 
                 search_uri = f"spotify:search:{query.replace(' ', '%20')}"
                 
-                # 2. Open Search Page
+                # Open Search Page (Using 'open' prevents Spotify from auto-playing a radio mix before the keystrokes hit)
                 subprocess.run(["open", search_uri])
                 
-                # 3. Wait for UI to load (Critical for 'Play' command to latch onto new context)
-                time.sleep(1.5) 
+                time.sleep(1.5) # Wait for UI to load
                 
-                # 4. Force Play (Try UI Scripting - The only reliable way without API)
+                # Force Play using the user's explicit UI Scripting flow
                 try:
-                    # Attempt to hit 'Enter' to play top result
-                    # Only works if Terminal/Python has Accessibility Permissions
-                    script = '''
+                    script_ui = '''
                     tell application "System Events"
                         tell process "Spotify"
                             set frontmost to true
-                            delay 0.5
-                            key code 48 -- Tab (Exit Search Bar)
-                            delay 0.5
-                            keystroke "a" using command down -- Select All (Highlights tracks)
                             delay 0.2
-                            key code 36 -- Enter (Play Selected / Navigate)
-                            
-                            -- User requested a second Enter after 1.5s delay
-                            delay 1.5
+                            key code 48 -- Tab (Exit Search Bar focus)
+                            delay 0.2
+                            keystroke "a" using command down -- Select All
+                            delay 0.2
+                            key code 36 -- Enter (Navigate into Top Result)
+                            delay 0.8 -- Wait 0.5-1s
                             key code 36 -- Enter (Confirm Playback)
                         end tell
                     end tell
                     '''
-                    subprocess.run(["osascript", "-e", script], check=True)
+                    subprocess.run(["osascript", "-e", script_ui], check=True)
                     return f"Playing {song} on Spotify."
                 except subprocess.CalledProcessError:
-                    # If UI scripting fails (Permissions issue), fallback to just opening
-                    return f"I opened '{song}' on Spotify, but I can't click 'Play' yet. Please grant me Accessibility permissions in System Settings."
+                    return f"I opened {song} on Spotify. Please grant me Accessibility permissions in System Settings so I can click play for you."
+                
             except Exception as e:
                 return f"Could not play on Spotify: {e}"
 
@@ -204,19 +198,43 @@ class MusicController:
             if self.current_app == "Spotify":
                 script = '''
                 tell application "Spotify"
+                    activate
                     set shuffling to true
+                    play
                     next track
                 end tell
                 '''
+                subprocess.run(["osascript", "-e", script], check=False)
+                
+                # Check if it actually started playing
+                check_script = 'tell application "Spotify" to get player state'
+                res = subprocess.run(["osascript", "-e", check_script], capture_output=True, text=True)
+                
+                if "playing" not in res.stdout.lower():
+                    # Fallback: Play a random popular playlist if queue was empty
+                    genres = [
+                        "spotify:playlist:37i9dQZF1DXcBWIGoYBM5M", # Today's Top Hits
+                        "spotify:playlist:37i9dQZF1DX0XUsuxWHRQd", # RapCaviar
+                        "spotify:playlist:37i9dQZF1DX4sWSpwq3LiO", # Peaceful Piano
+                        "spotify:playlist:37i9dQZF1DWZeKCadgRdKQ", # Deep Focus
+                        "spotify:playlist:37i9dQZF1DWWQRwui0ExPn"  # Lofi Beats
+                    ]
+                    random_uri = random.choice(genres)
+                    play_script = f'tell application "Spotify" to play track "{random_uri}"'
+                    subprocess.run(["osascript", "-e", play_script], check=False)
+                    return "Playing a random playlist."
+                
+                return "Playing a random song."
             else:
                 script = '''
                 tell application "Music"
                     set shuffle enabled to true
+                    play
                     next track
                 end tell
                 '''
-            subprocess.run(["osascript", "-e", script], check=False)
-            return "Playing a random song."
+                subprocess.run(["osascript", "-e", script], check=False)
+                return "Playing a random song."
         except Exception as e:
             return f"Error playing random: {str(e)}"
             
@@ -225,35 +243,39 @@ class MusicController:
         return self.play_random()
     
     def play_soothing(self):
-        """Play soothing music on Spotify (Dynamic Search)"""
+        """Play soothing music on Spotify/Music (Direct URIs)"""
         try:
-            if self.current_app != "Spotify":
-                subprocess.run(["open", "-a", "Spotify"])
-                time.sleep(1.5)
+            if self.current_app == "Spotify":
+                moods = [
+                    "spotify:playlist:37i9dQZF1DWZeKCadgRdKQ", # Deep Focus
+                    "spotify:playlist:37i9dQZF1DWWQRwui0ExPn", # Lofi Beats
+                    "spotify:playlist:37i9dQZF1DX4sWSpwq3LiO", # Peaceful Piano
+                    "spotify:playlist:37i9dQZF1DX8Uebhn9wzrS", # Chill Lofi Study Beats
+                    "spotify:playlist:37i9dQZF1DX3Ogo9pFvBkY"  # Ambient Study
+                ]
+                
+                random_uri = random.choice(moods)
+                
+                script = f'''
+                tell application "Spotify"
+                    activate
+                    set shuffling to true
+                    play track "{random_uri}"
+                end tell
+                '''
+                subprocess.run(["osascript", "-e", script], check=False)
+                return "Playing soothing music."
+            else:
+                # Apple Music Fallback
+                script = '''
+                tell application "Music"
+                    activate
+                    play playlist "Chill"
+                end tell
+                '''
+                subprocess.run(["osascript", "-e", script], check=False)
+                return "Playing soothing music on Apple."
             
-            # Moods to search for
-            moods = [
-                "Deep Focus",
-                "Lofi Beats",
-                "Chill Hits",
-                "Jazz Vibes",
-                "Ambient Study",
-                "Brain Food"
-            ]
-            
-            # "Search for X playlist" -> Play top result
-            query = f"playlist {random.choice(moods)}"
-            # URI Format: spotify:search:<query>
-            # This tells Spotify to search and play the best match
-            search_uri = f"spotify:search:{query.replace(' ', '%20')}"
-            
-            script = f'tell application "Spotify" to play track "{search_uri}"'
-            subprocess.run(["osascript", "-e", script], check=False)
-            
-            # Enable shuffle
-            self.shuffle_on()
-            
-            return f"Searching Spotify for {query}..."
         except Exception as e:
             return f"Could not play soothing music: {str(e)}"
 
