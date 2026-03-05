@@ -16,6 +16,12 @@ Jarvis is a powerful, extensible, and privacy-focused AI assistant built nativel
 [View Architecture](#-system-architecture-flow) ·
 [Report Issue](https://github.com/Sam-06060/jarvis-assistant/issues)
 
+<p align="center">
+  <img src="imagess/jarvisdemo1.jpeg" width="48%" alt="Jarvis Interface Demo 1" />
+  &nbsp;
+  <img src="imagess/jarvisdemo2.jpeg" width="48%" alt="Jarvis Interface Demo 2" />
+</p>
+
 ---
 
 ## Why Jarvis?
