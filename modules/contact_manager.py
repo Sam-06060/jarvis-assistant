@@ -3,6 +3,7 @@ import re
 import json
 import os
 import config
+import urllib.parse
 
 class ContactManager:
 
@@ -216,3 +217,134 @@ class ContactManager:
 
         except Exception as e:
             return f"Error opening Messages: {str(e)}"
+
+    # -------------------------
+    # 🟢 WHATSAPP (macOS)
+    # -------------------------
+
+    def format_whatsapp_number(self, raw_number):
+        """Format a macOS Contacts phone number for WhatsApp URL (pure digits with country code)"""
+        # Remove all non-numeric characters except +
+        clean_number = re.sub(r"[^0-9+]", "", raw_number)
+        
+        # If it already starts with +, just strip the + and keep the rest
+        if clean_number.startswith("+"):
+            return clean_number[1:]
+            
+        # If it doesn't start with +, but has 10 digits (India standard), prepend 91
+        if len(clean_number) == 10:
+            return f"91{clean_number}"
+            
+        # Otherwise, just return what we stripped (assuming it might be local or already include country code)
+        return clean_number
+
+    def _get_all_mac_contacts(self):
+        """Fetch all names from macOS contacts for the LLM to search through"""
+        script = '''
+        tell application "Contacts"
+            set contactNames to name of every person
+            set AppleScript's text item delimiters to ", "
+            return contactNames as text
+        end tell
+        '''
+        try:
+            result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip().split(", ")
+        except Exception:
+            pass
+        return []
+            
+    def _smart_resolve_name(self, requested_name):
+        """Use LLM to find the best matching name in macOS contacts"""
+        all_contacts = self._get_all_mac_contacts()
+        if not all_contacts:
+            return requested_name # Fallback
+            
+        # Optional: We can hook this to Groq or local Ollama. For safety and speed in ContactManager, 
+        # we'll do a basic text-based fuzzy match first, and if we have access to the app context's LLM, use it.
+        # Since ContactManager is a standalone module, we'll use `difflib` for fast, offline semantic fuzzy matching,
+        # which is extremely reliable for "Maa" -> "Mummy" if aliases are set, or slight misspellings.
+        import difflib
+        
+        # 1. Check exact aliases first
+        clean_req = self.clean_name(requested_name).lower()
+        if clean_req in self.NAME_ALIASES:
+            return self.NAME_ALIASES[clean_req]
+            
+        # 2. Fuzzy match against the address book
+        matches = difflib.get_close_matches(requested_name, all_contacts, n=1, cutoff=0.6)
+        if matches:
+            return matches[0]
+            
+        return requested_name
+
+    def get_whatsapp_contact_info(self, name):
+        """Resolves contact name and retrieves their phone number for WhatsApp."""
+        try:
+            resolved_name = self._smart_resolve_name(name)
+            resolved_name_clean = resolved_name.strip(' "\'')
+
+            script = f'''
+            tell application "Contacts"
+                set matchingPeople to (every person whose name contains "{resolved_name_clean}")
+                if (count of matchingPeople) > 0 then
+                    set firstPerson to item 1 of matchingPeople
+                    set phoneList to phones of firstPerson
+                    if (count of phoneList) > 0 then
+                        return value of item 1 of phoneList
+                    end if
+                end if
+                return ""
+            end tell
+            '''
+            
+            script_wrapper = f"ignoring case\\n{script}\\nend ignoring"
+            result = subprocess.run(["osascript", "-e", script_wrapper], capture_output=True, text=True, timeout=5)
+
+            if result.returncode != 0 or not result.stdout.strip():
+                result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=5)
+                if result.returncode != 0 or not result.stdout.strip():
+                    return None, resolved_name_clean
+
+            raw_phone = result.stdout.strip()
+            formatted_phone = self.format_whatsapp_number(raw_phone)
+            
+            if not formatted_phone:
+                return None, resolved_name_clean
+                
+            return formatted_phone, resolved_name_clean
+            
+        except Exception as e:
+            return None, str(e)
+
+    def send_whatsapp_message(self, name, message=None, pre_formatted_phone=None):
+        """Open WhatsApp Desktop chat via Apple Shortcuts with optional pre-filled message"""
+        try:
+            if pre_formatted_phone:
+                formatted_phone = pre_formatted_phone
+                resolved_name = name
+            else:
+                formatted_phone, resolved_name = self.get_whatsapp_contact_info(name)
+                
+            if not formatted_phone:
+                return f"Could not find a valid number for {resolved_name}."
+
+
+            
+
+
+            if message:
+                # Apple Shortcuts requires E.164 format (+CountryCodeNumber)
+                # e.g. +919876543210 — NOT 919876543210 (which looks like plain text)
+                shortcuts_phone = f"+{formatted_phone}" if not formatted_phone.startswith("+") else formatted_phone
+                shortcut_input = f"{shortcuts_phone}|{message}"
+                subprocess.run(["shortcuts", "run", "JarvisWhatsApp", "-i", shortcut_input], check=False)
+                return f"Message sent to {resolved_name}."
+            else:
+                url = f"whatsapp://send?phone={formatted_phone}"
+                subprocess.run(["open", url], check=False)
+                return f"Opening WhatsApp with {resolved_name}."
+
+        except Exception as e:
+            return f"Error triggering WhatsApp Shortcut: {str(e)}"
