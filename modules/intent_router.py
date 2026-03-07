@@ -122,7 +122,7 @@ TASK: Classify this command. Output JSON only.
                 "stream": False,
                 "options": {
                     "temperature": 0.1,
-                    "num_predict": 200  # Intent JSON is ~50 tokens, cap at 200 for safety
+                    "num_predict": 80  # Intent JSON is ~50 tokens, cap at 200 for safety
                 }
             }
             
