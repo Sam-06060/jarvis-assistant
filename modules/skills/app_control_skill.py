@@ -27,27 +27,17 @@ class AppControlSkill(Skill):
 
         # 2. GENERIC APP OPENER
         app_name = cmd.replace("open", "").strip()
-        if not app_name: return False
+        if not app_name:
+            return False
 
         config = self.app.get('config')
-        fuzzy = self.app.get('speech') # Wait, fuzzy matcher was passed to CommandProcessor __init__...
-        # We need to access fuzzy matcher. It was passed as `fuzzy_matcher` to __init__.
-        # I stored it in `self.fuzzy` in CommandProcessor.
-        # But `app_context` (CommandProcessor.app_context) didn't include it explicitly?
-        # I need to update CommandProcessor to pass `fuzzy` in context.
-        # For now, I'll access it safely.
 
         # ALIAS MATCHING
         if config and hasattr(config, "MAC_APPS"):
             for key, app_full_name in config.MAC_APPS.items():
                 if key in cmd:
                     return self._open_app(app_full_name)
-        
-        # FUZZY MATCHING
-        # Accessing fuzzy matcher from context if available
-        # logic: self.fuzzy.match_app_name(app_name)
-        # Note: I haven't updated CommandProcessor to pass 'fuzzy' yet. I will do that next.
-        
+
         # BASIC OPEN
         return self._open_app(app_name)
 

@@ -164,6 +164,12 @@ CLOUD_FIRST_CONVERSATION = True  # Route general conversation through Groq cloud
 GROQ_CONVERSATION_MODEL = "llama-3.3-70b-versatile"
 GROQ_CONVERSATION_TIMEOUT = 15  # Fallback to Ollama if cloud is slow
 
+# ============== INTENT ROUTER (Cloud-First, Ollama Fallback) ==============
+INTENT_ROUTER_MODEL = "llama-3.1-8b-instant"   # Fast Groq model for intent classification
+INTENT_ROUTER_MAX_TOKENS = 150                  # Forced tool_choice needs ~120 tokens for response
+INTENT_ROUTER_GROQ_RETRIES = 3                  # Retry attempts before falling back to Ollama
+INTENT_ROUTER_GROQ_RETRY_WAIT = 10              # Seconds between retries
+
 # ============== OPENROUTER CONFIG (Primary Code Generation) ==============
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = "stepfun/step-3.5-flash:free"

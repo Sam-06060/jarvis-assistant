@@ -157,7 +157,7 @@ class AutomationSkill(Skill):
             return True
 
 
-        elif any(trigger in cmd for trigger in ["mimic", "execute", "run", "do"]):
+        elif any(trigger in cmd for trigger in ["mimic", "execute", "run"]) or re.search(r"^do\s+(macro|fast|slow|\w+\s+macro)\b", cmd):
             mimic = self.app.get('mimic')
             if not mimic:
                 self.speech.speak("Mimic module unavailable.")

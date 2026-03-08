@@ -1,7 +1,7 @@
 import sys
 import os
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -70,6 +70,32 @@ class TestSkills(unittest.TestCase):
         self.assertTrue(skill.can_handle("open safari"))
         # We don't run handle because it tries to launch apps, but we can check logic path
         # skill.handle("open safari") would fail if 'open' not mocked in os.system
+
+    def test_app_control_skill_typo_uses_fuzzy_match(self):
+        skill = AppControlSkill(self.mock_context)
+        self.mock_context['fuzzy'].match_app_name.return_value = "Google Chrome"
+
+        fail = MagicMock(returncode=1, stderr="Unable to find")
+        ok = MagicMock(returncode=0, stderr="")
+        with patch("subprocess.run", side_effect=[fail, ok]):
+            handled = skill.handle("open crome")
+
+        self.assertTrue(handled)
+        self.mock_context['speech'].speak.assert_called_with("Opening Google Chrome")
+        self.assertEqual(self.mock_context['fuzzy'].match_app_name.call_count, 1)
+
+    def test_app_control_skill_typo_calendar_uses_fuzzy_match(self):
+        skill = AppControlSkill(self.mock_context)
+        self.mock_context['fuzzy'].match_app_name.return_value = "Calendar"
+
+        fail = MagicMock(returncode=1, stderr="Unable to find")
+        ok = MagicMock(returncode=0, stderr="")
+        with patch("subprocess.run", side_effect=[fail, ok]):
+            handled = skill.handle("open calender")
+
+        self.assertTrue(handled)
+        self.mock_context['speech'].speak.assert_called_with("Opening Calendar")
+        self.assertEqual(self.mock_context['fuzzy'].match_app_name.call_count, 1)
         
     def test_weather_skill(self):
         skill = WeatherSkill(self.mock_context)
@@ -172,6 +198,32 @@ class TestSkills(unittest.TestCase):
         self.assertTrue(skill.can_handle("turn it down"))
         self.assertTrue(skill.can_handle("unmute"))
         self.assertTrue(skill.can_handle("mute"))
+
+    def test_volume_target_phrase_sets_absolute_value(self):
+        skill = SystemSkill(self.mock_context)
+        with patch("subprocess.run") as run_mock:
+            self.assertTrue(skill.handle("turn it down to 20 percent"))
+        run_mock.assert_any_call(["osascript", "-e", "set volume output volume 20"], check=False)
+        self.mock_context['speech'].speak.assert_called_with("Volume set to 20 percent.")
+
+    def test_volume_target_phrase_word_number_sets_absolute_value(self):
+        skill = SystemSkill(self.mock_context)
+        with patch("subprocess.run") as run_mock:
+            self.assertTrue(skill.handle("turn it up to fifty"))
+        run_mock.assert_any_call(["osascript", "-e", "set volume output volume 50"], check=False)
+        self.mock_context['speech'].speak.assert_called_with("Volume set to 50 percent.")
+
+    def test_volume_relative_down_still_adjusts(self):
+        skill = SystemSkill(self.mock_context)
+        current = MagicMock(stdout="50", returncode=0)
+        with patch("subprocess.run", side_effect=[current, MagicMock(returncode=0)]) as run_mock:
+            self.assertTrue(skill.handle("turn it down"))
+        run_mock.assert_any_call(
+            ["osascript", "-e", "output volume of (get volume settings)"],
+            capture_output=True, text=True
+        )
+        run_mock.assert_any_call(["osascript", "-e", "set volume output volume 40"], check=False)
+        self.mock_context['speech'].speak.assert_called_with("Volume set to 40 percent.")
 
     # ==== NEW: Brightness Fix Test ====
     def test_brightness_word_to_number(self):

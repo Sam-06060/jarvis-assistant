@@ -100,6 +100,10 @@ class JarvisApp:
             
             context = ContextManager()
             ServiceRegistry.register("context", context)
+
+            if config.ENABLE_FUZZY_MATCHING:
+                fuzzy = FuzzyMatcher()
+                ServiceRegistry.register("fuzzy", fuzzy)
             
             # Initialize History BEFORE Brain so Brain has memory
             history = None

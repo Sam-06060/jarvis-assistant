@@ -2,7 +2,7 @@ import traceback
 
 # Try importing search libraries, handling potential missing dependencies gracefully
 try:
-    from duckduckgo_search import DDGS
+    from ddgs import DDGS
 except ImportError:
     DDGS = None
 
@@ -32,15 +32,28 @@ class WebSearch:
         Robust search with fallback: DDG -> Google -> Manual Scraper -> Wikipedia
         Returns a formatted string context.
         """
+        # Clean conversational fluff from the query to improve search accuracy
+        fluff_phrases = [
+            "do you know ", "do you have information about ", "can you tell me ",
+            "tell me ", "find out ", "search for ", "what is the ", "who is the "
+        ]
+        clean_query = query.lower()
+        for fluff in fluff_phrases:
+            if clean_query.startswith(fluff):
+                clean_query = clean_query[len(fluff):].strip()
+        # If we stripped everything, revert to the original query
+        if len(clean_query) < 2:
+            clean_query = query
+
         results = []
         source_used = "None"
         
         # 1. Try DuckDuckGo (Primary)
         if self.ddgs:
-            print(f"🔍 Searching DuckDuckGo: '{query}'")
+            print(f"🔍 Searching DuckDuckGo: '{clean_query}'")
             try:
                 # Fetch more results to allow filtering
-                ddg_results = self.ddgs.text(query, max_results=max_results + 3)
+                ddg_results = self.ddgs.text(clean_query, max_results=max_results + 3)
                 
                 if ddg_results:
                     filtered_count = 0
@@ -67,10 +80,10 @@ class WebSearch:
         
         # 2. Try Google (Fallback 1)
         if not results and google_search:
-            print(f"🔍 Switch to Google Search: '{query}'")
+            print(f"🔍 Switch to Google Search: '{clean_query}'")
             try:
                 # Try simple iterator
-                g_results = list(google_search(query, num_results=max_results, advanced=True))
+                g_results = list(google_search(clean_query, num_results=max_results, advanced=True))
                 if g_results:
                     for res in g_results:
                          results.append(f"Title: {res.title}\nURL: {res.url}\nSummary: {res.description}")
@@ -92,7 +105,7 @@ class WebSearch:
                      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36"
                  }
                  # Use DDG HTML endpoint directly
-                 url = f"https://html.duckduckgo.com/html/?q={query}"
+                 url = f"https://html.duckduckgo.com/html/?q={clean_query}"
                  resp = requests.get(url, headers=headers, timeout=5)
                  
                  if resp.status_code == 200:
@@ -122,11 +135,11 @@ class WebSearch:
             try:
                 # Cleanup query for better Wiki matches
                 # Don't strip "current" - it helps find incumbent/list pages
-                clean_query = query.lower().replace("who is", "").replace("what is", "").replace("the", "").strip()
-                if len(clean_query) < 4: clean_query = query # Revert if too short
+                clean_wiki_query = clean_query.replace("the", "").strip()
+                if len(clean_wiki_query) < 4: clean_wiki_query = clean_query # Revert if too short
                 
-                print(f"🔍 Switch to Wikipedia: '{clean_query}'")
-                wiki_res = wikipedia.search(clean_query)
+                print(f"🔍 Switch to Wikipedia: '{clean_wiki_query}'")
+                wiki_res = wikipedia.search(clean_wiki_query)
                 
                 if wiki_res:
                     # Fetch top 2 results

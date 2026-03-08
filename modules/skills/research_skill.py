@@ -44,7 +44,7 @@ class ResearchSkill(Skill):
         if assassin and self._is_video_study_command(cmd):
             def run_assassin():
                 self._emit_hud_stage("FETCHING SUBTITLES", "Fetching subtitles...")
-                url = self._extract_youtube_url(cmd)
+                url = self._extract_youtube_url(command)
                 if not url:
                     clip_text = self._get_clipboard_text(clipboard)
                     url = self._extract_youtube_url(clip_text)

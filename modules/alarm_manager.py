@@ -3,7 +3,20 @@ import subprocess
 import datetime
 import re
 from dateutil import parser
-from modules.skills.base import Skill
+
+
+WORD_HOUR_MAP = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+}
+
+WORD_MINUTE_MAP = {
+    "zero": 0, "oh": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+    "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+    "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20, "thirty": 30,
+    "forty": 40, "fifty": 50,
+}
 
 class AlarmManager:
     """
@@ -63,6 +76,7 @@ class AlarmManager:
         """
         try:
             time_string = time_string.lower().strip()
+            time_string = self._normalize_spoken_time_phrases(time_string)
             now = datetime.datetime.now()
             
             # 1. Relative Time (e.g. "in 20 minutes")
@@ -94,6 +108,10 @@ class AlarmManager:
                 # Ensure date is tomorrow
                 if parsed_time.date() == now.date():
                     parsed_time = parsed_time + datetime.timedelta(days=1)
+
+                # If user said "morning" and parser inferred PM, force AM.
+                if "morning" in time_string and parsed_time.hour >= 12:
+                    parsed_time = parsed_time - datetime.timedelta(hours=12)
             
             # AM/PM Inference for bare numbers (e.g. "11", "5:30")
             # Check if AM/PM was explicit in string
@@ -159,8 +177,73 @@ class AlarmManager:
                 if future_candidates:
                     parsed_time = future_candidates[0]
 
+            # Final guard: always return a future alarm time.
+            if parsed_time <= now:
+                parsed_time = parsed_time + datetime.timedelta(days=1)
+
             return parsed_time
 
         except Exception as e:
             print(f"Time parse error: {e}")
             return None
+
+    def _normalize_spoken_time_phrases(self, text):
+        """Normalize spoken alarm phrasing into parser-friendly text."""
+        text = re.sub(r"\b(?:wake me up|set (?:an )?alarm)\b", "", text)
+        text = re.sub(r"\bat\s+", "", text)
+        text = re.sub(r"\s+", " ", text).strip()
+
+        tokens = [t.strip(".,!?") for t in text.split()]
+        if len(tokens) < 2:
+            return text
+
+        i = 0
+        out = []
+        while i < len(tokens):
+            hour = self._parse_hour_token(tokens[i])
+            if hour is not None and i + 1 < len(tokens):
+                minute, consumed = self._parse_minute_tokens(tokens, i + 1)
+                if minute is not None:
+                    out.append(f"{hour}:{minute:02d}")
+                    i = i + 1 + consumed
+                    continue
+            out.append(tokens[i])
+            i += 1
+
+        return " ".join(out)
+
+    def _parse_hour_token(self, token):
+        if token.isdigit():
+            val = int(token)
+            if 1 <= val <= 12:
+                return val
+            return None
+        return WORD_HOUR_MAP.get(token)
+
+    def _parse_minute_tokens(self, tokens, idx):
+        token = tokens[idx]
+
+        if token.isdigit():
+            val = int(token)
+            if 0 <= val <= 59:
+                return val, 1
+            return None, 0
+
+        if token == "oh" and idx + 1 < len(tokens):
+            nxt = tokens[idx + 1]
+            if nxt.isdigit() and 0 <= int(nxt) <= 9:
+                return int(nxt), 2
+            if nxt in WORD_MINUTE_MAP and 0 <= WORD_MINUTE_MAP[nxt] <= 9:
+                return WORD_MINUTE_MAP[nxt], 2
+            return None, 0
+
+        base = WORD_MINUTE_MAP.get(token)
+        if base is None:
+            return None, 0
+
+        if base >= 20 and base % 10 == 0 and idx + 1 < len(tokens):
+            nxt = WORD_MINUTE_MAP.get(tokens[idx + 1])
+            if nxt is not None and 1 <= nxt <= 9:
+                return base + nxt, 2
+
+        return base, 1

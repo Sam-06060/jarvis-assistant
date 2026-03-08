@@ -100,6 +100,23 @@ def _parse_number_from_text(text):
     return result
 
 
+def _extract_explicit_volume_target(cmd):
+    """
+    Return explicit target volume value for phrases like:
+    - "turn it down to 20 percent"
+    - "turn it up to fifty"
+    - "set volume to 30"
+    """
+    target_patterns = [
+        r"\bturn\s+(?:it\s+)?(?:up|down)\s+to\b",
+        r"\bset\s+(?:the\s+)?(?:volume|sound)\s+(?:to|at)\b",
+        r"\bvolume\s+(?:to|at)\b",
+    ]
+    if not any(re.search(pattern, cmd) for pattern in target_patterns):
+        return None
+    return _parse_number_from_text(cmd)
+
+
 class SystemSkill(Skill):
     def can_handle(self, command: str) -> bool:
         cmd = command.lower().strip()
@@ -282,6 +299,11 @@ class SystemSkill(Skill):
             subprocess.run(["osascript", "-e", "set volume with output muted"], check=False)
             self.speech.speak("Muted.")
             return True
+
+        # Explicit target should take precedence over relative up/down intents.
+        explicit_target = _extract_explicit_volume_target(cmd)
+        if explicit_target is not None:
+            return self._set_volume(explicit_target)
 
         # Set to specific level
         if "set volume" in cmd or "volume to" in cmd or "volume at" in cmd:

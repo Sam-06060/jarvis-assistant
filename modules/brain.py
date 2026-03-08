@@ -164,8 +164,8 @@ CRITICAL INSTRUCTIONS:
         
         if web_search:
             # Step 1: Contextualize the query (resolve pronouns like "he", "she", "his")
-            # This rewritten query is used for BOTH searching AND sending to Ollama
-            display_query = self._contextualize_query(user_input)
+            # Ollama is the active brain here, so use Ollama for contextualization
+            display_query = self._contextualize_query(user_input, use_cloud=False)
             
             # Step 2: Search the web with the contextualized query
             print(f"🌍 Searching the web for: '{display_query}'")
@@ -255,29 +255,60 @@ CRITICAL INSTRUCTIONS:
             print(f"❌ Local Brain Error: {e}")
             return "I am having trouble thinking locally, sir."
 
-    def _contextualize_query(self, user_input):
+    def _contextualize_query(self, user_input, use_cloud=True):
         """
-        Uses LLM to rewrite ambiguous queries based on conversation history.
-        Resolves pronouns and adds context for BOTH search and Ollama.
+        Resolves pronouns/ambiguity in short queries using conversation history.
         Example: "How old is he?" -> "How old is Narendra Modi?"
-        Example: "tell his history" -> "Tell me about Narendra Modi's history"
+
+        use_cloud=True  → Groq path (default). Pronoun gate skips API for clear queries.
+        use_cloud=False → Ollama path (fallback). Original full logic, Ollama IS running.
         """
-        # 1. Quick Checks to skip rewriting
-        if not self.context or not hasattr(self.context, 'get_context_window'):
-            return user_input
-            
-        # Skip if query is long and self-contained (likely doesn't need context)
-        if len(user_input.split()) > 12: 
+        # Skip long queries — already self-contained
+        if len(user_input.split()) > 12:
             return user_input
 
-        # 2. Get recent history
+        # Get conversation context (shared by both paths)
+        if not self.context or not hasattr(self.context, 'get_context_window'):
+            return user_input
         history_text = self.context.get_context_window(limit=2)
         if not history_text:
             return user_input
 
-        # 3. Ask LLM to rewrite the full query
+        # ── GROQ PATH (cloud is up) ─────────────────────────────────────────────
+        if use_cloud:
+            # Fast gate: only call Groq if pronouns actually need resolving
+            pronouns = {"he", "she", "it", "his", "her", "their", "they", "them", "him"}
+            has_pronoun = bool(pronouns & set(user_input.lower().split()))
+            if not has_pronoun:
+                return user_input  # Already clear — zero API cost
+
+            try:
+                print("🔄 Contextualizing query via Groq...")
+                rewrite_prompt = (
+                    f"Rewrite this query to be self-contained by replacing pronouns with actual names from context.\n"
+                    f"Output ONLY the rewritten query, nothing else.\n\n"
+                    f"Context:\n{history_text}\n\n"
+                    f"Query: {user_input}\n"
+                    f"Rewritten:"
+                )
+                refined = self.groq._call_groq(
+                    prompt=rewrite_prompt,
+                    system_prompt="You are a query rewriter. Output only the rewritten query, no explanation.",
+                    model=self.cloud_model
+                )
+                if refined:
+                    refined = refined.strip().strip('"').strip("'")
+                    if 2 < len(refined) < 200 and "\n" not in refined:
+                        print(f"✅ Contextualized (Groq): '{user_input}' -> '{refined}'")
+                        return refined
+            except Exception as e:
+                print(f"⚠️ Groq contextualization failed: {e}")
+            return user_input
+
+        # ── OLLAMA PATH (Groq failed, Ollama is the active brain) ───────────────
+        # Original full logic — Ollama IS running here, so we use it directly.
         try:
-            print("🔄 Contextualizing Query...")
+            print("🔄 Contextualizing query via Ollama...")
             rewrite_prompt = f"""SYSTEM: You are a Query Rewriter. Rewrite the USER QUERY to be self-contained by resolving pronouns and adding context from the RECENT CONVERSATION.
 
 RULES:
@@ -306,20 +337,18 @@ REWRITTEN QUERY:"""
                 "stream": False,
                 "options": {"temperature": 0.1, "num_predict": 50}
             }
-            
             response = requests.post(f"{config.OLLAMA_URL}/api/chat", json=payload, timeout=5)
             if response.status_code == 200:
                 refined = response.json().get("message", {}).get("content", "").strip()
-                # Sanity check: don't use if empty, weird, or too long
                 if refined and 2 < len(refined) < 200:
-                    # Remove any quotes the LLM may have added
                     refined = refined.strip('"').strip("'")
-                    print(f"✅ Refined: '{user_input}' -> '{refined}'")
+                    print(f"✅ Contextualized (Ollama): '{user_input}' -> '{refined}'")
                     return refined
         except Exception as e:
-            print(f"⚠️ Query Refinement Failed: {e}")
-        
+            print(f"⚠️ Ollama contextualization failed: {e}")
+
         return user_input
+
 
     def _deliver_code_to_desktop(self, text):
         """

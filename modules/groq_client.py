@@ -158,10 +158,12 @@ class GroqClient:
             result = self._call_openrouter(prompt, system_prompt)
             if result:
                 return result
-            logger.warning("⚠️ OpenRouter failed (All retries exhausted). Fallback logic disabled by user request.")
-            # User requested NO SWITCHING. We return None so it falls back to Local Ollama or fails.
-            # return self._call_groq(prompt, system_prompt, model) 
+            logger.warning("⚠️ OpenRouter failed (All retries exhausted). Falling back to Groq.")
         
+        # Fallback to Groq
+        if self.groq_available:
+            return self._call_groq(prompt, system_prompt, model)
+            
         return None
 
     # ============================================================
@@ -228,7 +230,8 @@ class GroqClient:
                                 
                             try:
                                 data_json = json.loads(data_str)
-                                delta = data_json.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                choices = data_json.get("choices", [])
+                                delta = choices[0].get("delta", {}).get("content", "") if choices else ""
                                 
                                 if delta:
                                     full_content.append(delta)
