@@ -101,19 +101,54 @@ class AutomationSkill(Skill):
 
         # --- CURSOR ---
         if "cursor control" in cmd or "mouse control" in cmd:
-             # Lazy load cursor on demand (cooling optimization)
-             cp = self.app.get('command_processor')
-             cursor = cp._get_cursor() if cp else None
-             if cursor:
-                 self.speech.speak("Visual interface active.")
-                 try:
-                     cursor.start()
-                     self.speech.speak("Cursor control closed.")
-                 except:
-                     self.speech.speak("Visual system error.")
-             else:
-                 self.speech.speak("Cursor module unavailable.")
-             return True
+            cp = self.app.get('command_processor')
+            if not cp:
+                self.speech.speak("Cursor module unavailable.")
+                return True
+
+            # Compatibility path: older CommandProcessor only exposes _get_cursor().
+            if not hasattr(cp, "get_cursor_load_status"):
+                cursor = cp._get_cursor() if hasattr(cp, "_get_cursor") else None
+                if not cursor:
+                    self.speech.speak("Cursor module unavailable.")
+                    return True
+                self.speech.speak("Visual interface active.")
+                try:
+                    cursor.start()
+                    self.speech.speak("Cursor control closed.")
+                except Exception as e:
+                    self.logger.error(f"Cursor Runtime Error: {e}")
+                    self.speech.speak("Visual system error.")
+                return True
+
+            status = cp.get_cursor_load_status()
+            state = status.get("state")
+
+            if state == "READY":
+                self._start_cursor_session(cp)
+                return True
+
+            if state == "LOADING":
+                self.speech.speak("Cursor system is warming up. Opening it when ready.")
+                self._wait_and_start_cursor_on_main_thread(cp)
+                return True
+
+            if state == "IDLE":
+                cp.ensure_cursor_loaded_async()
+                self.speech.speak("Warming up cursor control. Opening it as soon as it's ready.")
+                self._wait_and_start_cursor_on_main_thread(cp)
+                return True
+
+            if state == "FAILED":
+                self.speech.speak(self._cursor_failure_message(status))
+                retry_state = cp.ensure_cursor_loaded_async(force_retry=True)
+                if retry_state == "LOADING":
+                    self.speech.speak("Retrying cursor warmup now.")
+                    self._wait_and_start_cursor_on_main_thread(cp)
+                return True
+
+            self.speech.speak("Cursor module unavailable.")
+            return True
 
         # --- VISUALS ---
         if "analyze" in cmd or "hackerman" in cmd:
@@ -241,6 +276,47 @@ class AutomationSkill(Skill):
 
         bullets = "\n".join(f"• {line}" for line in picked)
         return f"I couldn't run full AI summarization right now, so here's a quick summary:\n{bullets}"
+
+    def _cursor_failure_message(self, status: dict) -> str:
+        cause = status.get("failure_cause")
+        if cause == "missing_dependency":
+            return "Cursor dependencies are missing. Run bootstrap or reinstall requirements, then try again."
+        if cause == "camera_permission":
+            return "Camera permission is blocking cursor control. Allow camera access in System Settings and try again."
+        if cause == "accessibility_permission":
+            return "Accessibility permission is required for cursor control. Enable it in System Settings and try again."
+        if cause == "camera_busy":
+            return "Your camera is busy in another app. Close the other camera app and try again."
+        return "Cursor module failed to load. Check camera and accessibility permissions, then try again."
+
+    def _wait_and_start_cursor_on_main_thread(self, cp):
+        """
+        Keep cursor startup on the current command thread.
+        macOS AVFoundation/OpenCV camera auth fails from background threads.
+        """
+        ready = cp.wait_for_cursor_ready(timeout=60)
+        if not ready:
+            status = cp.get_cursor_load_status()
+            if status.get("state") == "FAILED":
+                self.speech.speak(self._cursor_failure_message(status))
+            else:
+                self.speech.speak("Cursor warmup is still in progress. Say cursor control again in a moment.")
+            return
+        self._start_cursor_session(cp)
+
+    def _start_cursor_session(self, cp):
+        cursor = cp.get_cursor_if_ready()
+        if not cursor:
+            self.speech.speak("Cursor system is still warming up.")
+            return
+
+        self.speech.speak("Visual interface active.")
+        try:
+            cursor.start()
+            self.speech.speak("Cursor control closed.")
+        except Exception as e:
+            self.logger.error(f"Cursor Runtime Error: {e}")
+            self.speech.speak("Visual system error.")
 
     def _extract_inline_summary_target(self, command: str) -> str:
         text = command.strip()
