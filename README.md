@@ -10,7 +10,7 @@
 
 
 
-Jarvis is a powerful, extensible, and privacy-focused AI assistant built natively for macOS. It combines an ultra-fast local voice engine, on-device biometric security, and a local-first LLM brain to deliver an "Iron Man" style assistant experience. Featuring a robust Python backend and a native Swift UI desktop client connected via a Socket API, Jarvis executes highly complex "Nuclear" skills—from autonomously bootstrapping entire codebases to mimicking physical workflows. Your AI, your machine.
+Jarvis is a powerful, extensible, and privacy-focused AI assistant built natively for macOS. It combines an ultra-fast local voice engine, on-device biometric security, and a online-first LLM brain to deliver an "Iron Man" style assistant experience. Featuring a robust Python backend and a native Swift UI desktop client connected via a Socket API, Jarvis executes highly complex "Nuclear" skills—from autonomously bootstrapping entire codebases to mimicking physical workflows. Your AI, your machine.
 
 [Quick Start](#installation--quick-start) ·
 [View Architecture](#-system-architecture-flow) ·
@@ -55,7 +55,7 @@ Jarvis is a powerful, extensible, and privacy-focused AI assistant built nativel
 | Feature | Description |
 |---------|-------------|
 | **Voice Engine** | Hybrid Apple STT + Whisper fallback. <200ms latency with 100ms VAD detection. |
-| **AI Brain** | Local execution via Ollama (Llama 3.2) + fallback/complex routing via Groq/OpenRouter. |
+| **AI Brain** | online execution via Ollama (Llama 3.3) + fallback/complex routing via Groq/OpenRouter. |
 | **FaceID Auth** | Local biometric facial recognition required for secure commands (e.g., shutdown, delete). |
 | **Smart Web Search** | AI-powered sub-500ms intent classifier determines if external factual data is needed. |
 | **Gesture Cursor** | Control your Mac with hand signs (Point, Pinch, Fist, Peace). |
