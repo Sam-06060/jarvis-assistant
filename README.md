@@ -26,7 +26,7 @@ Jarvis is a powerful, extensible, and privacy-focused AI assistant built nativel
 
 ## Why Jarvis?
 - **Ultra-Fast Voice Engine**: Sub-200ms latency using hybrid Apple Speech Recognition and local Faster Whisper fallback. VAD optimized for instant conversational gaps.
-- **Privacy & Security First**: Local-first processing architecture. Features FaceID biometric authentication before executing sensitive commands.
+- **Privacy & Security First**: Online-first processing architecture. can load LLM locally on-demand and offline. Features FaceID biometric authentication before executing sensitive commands.
 - **"Nuclear" Capabilities**: Includes Architect Mode (project scaffolding), The Mimic (macro recording/playback), Content Assassin (YouTube/media summarization), and Dead Drop (secure file hand-offs).
 - **Gesture Control**: Built-in webcam hand-gesture tracking to control the macOS cursor.
 - **Extensible Architecture**: Modular "Skill" systems operating through a central Service Registry and Event Manager.
@@ -115,7 +115,7 @@ Secure, ephemeral data hand-off.
 - **Audio Ducking:** Automatically lowers system media volume while listening and speaking.
 
 ### The Brain
-- **Local Priority:** Heavy reliance on local Ollama models (e.g., `llama3.2`) for context and chat.
+- **Online Priority:** Heavy reliance on online Ollama models (e.g., `llama-70b versatile`) for context and chat.
 - **Cloud Escalation:** High-complexity tasks (code generation, heavy intent routing) are dynamically routed to Groq (`llama-3.3-70b-versatile`) or OpenRouter to ensure maximum intelligence without blocking the main event loop.
 
 ---
