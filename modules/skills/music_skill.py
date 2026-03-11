@@ -119,17 +119,24 @@ class MusicSkill(Skill):
                         video_url += "?" + params.replace("&", "", 1)
                     
                     self.logger.info(f"▶️ Playing YouTube: {video_url}")
-                    webbrowser.open(video_url)
+                    # Target the YouTube Web App (Dock Application) if it exists, fallback to Safari
+                    yt_app_path = "/Users/samsonganta/Applications/YouTube.app"
+                    import os
+                    if os.path.exists(yt_app_path):
+                        subprocess.run(["open", "-a", yt_app_path, video_url])
+                    else:
+                        subprocess.run(["open", "-a", "Safari", video_url])
                     
-                    # Force Play with Keyboard
-                    from pynput.keyboard import Key, Controller
-                    import time
-                    
-                    time.sleep(3.0) 
-                    
-                    keyboard = Controller()
-                    keyboard.press('k')
-                    keyboard.release('k')
+                    # Force Play with Keyboard - COMMENTED OUT AS PER USER REQUEST
+                    # YouTube's autoplay=1 logic is usually sufficient and this was toggling pause
+                    # from pynput.keyboard import Key, Controller
+                    # import time
+                    # 
+                    # time.sleep(3.0) 
+                    # 
+                    # keyboard = Controller()
+                    # keyboard.press('k')
+                    # keyboard.release('k')
                     
                 else:
                     self.speech.speak(f"Could not find {song} on YouTube.")
