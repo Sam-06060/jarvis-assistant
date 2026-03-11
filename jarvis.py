@@ -838,7 +838,29 @@ def log_history(history_component, user_text, ai_text, type_):
         history_component.log_exchange(user_text, ai_text, type_)
 
 # --- ENTRY POINT ---
+def _check_single_instance():
+    """
+    Bulletproof Single Instance Guard.
+    If port 8492 is busy, Jarvis is already running.
+    In that case, ensure the Swift App is open and exit.
+    """
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.5)
+            if s.connect_ex(('127.0.0.1', 8492)) == 0:
+                print("ℹ️ Jarvis backend already running (Port 8492).")
+                print("🚀 Activating Jarvis UI...")
+                os.system("open /Applications/Jarvis.app &")
+                sys.exit(0)
+    except Exception:
+        pass
+
 def main():
+    _check_singleton = "--ignore-singleton" not in sys.argv
+    if _check_singleton:
+        _check_single_instance()
+
     api_mode = "--api" in sys.argv
     
     if config.DEV_MODE or api_mode:
