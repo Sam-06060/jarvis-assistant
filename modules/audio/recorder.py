@@ -68,15 +68,44 @@ class AudioRecorder:
             except: pass
             self.stream = None
 
+    # def read_chunk(self):
+    #     """Reads a single chunk from stream"""
+    #     if not self.stream: self.open_stream()
+    #     if not self.stream: return None
+
+    #     try:
+    #         return self.stream.read(self.chunk, exception_on_overflow=False)
+    #     except Exception as e:
+    #         logger.warning(f"Read error: {e}")
+    #         return None
+
     def read_chunk(self):
-        """Reads a single chunk from stream"""
+        """Reads a single chunk from stream, enforcing strict buffer sizes."""
         if not self.stream: self.open_stream()
         if not self.stream: return None
 
         try:
-            return self.stream.read(self.chunk, exception_on_overflow=False)
+            # PyAudio read defaults to blocking
+            data = self.stream.read(self.chunk, exception_on_overflow=False)
+
+            # THE FIX: Apple Silicon CoreAudio Quirk Protection
+            # 512 frames * 2 bytes (16-bit format) = 1024 bytes.
+            # If CoreAudio desyncs and hands us a partial frame or empty bytes,
+            # reject it and force a micro-sleep to prevent a CPU spin-loop.
+            expected_bytes = self.chunk * 2 
+            if not data or len(data) != expected_bytes:
+                time.sleep(0.01) # Force the CPU to rest during a driver glitch
+                return None
+
+            return data
+
+        except IOError:
+            # Catches PortAudio buffer underflows/overflows cleanly without thrashing
+            time.sleep(0.01)
+            return None
         except Exception as e:
             logger.warning(f"Read error: {e}")
+            time.sleep(0.1)
             return None
 
     def record_until_silence(self, max_duration=30, silence_threshold=0.6, hud_queue=None):
