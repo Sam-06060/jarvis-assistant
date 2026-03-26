@@ -214,3 +214,22 @@ class AgentConfig:
         self.max_iterations = max(1, min(50, self.max_iterations))
         self.timeout = max(5, min(120, self.timeout))
         self.retry_budget = max(0, min(5, self.retry_budget))
+
+# ============== SMARTTHINGS CONFIGURATION ==============
+SMARTTHINGS_PAT = os.environ.get("SMARTTHINGS_PAT")
+SMARTTHINGS_DEVICE_ID = os.environ.get("SMARTTHINGS_DEVICE_ID")
+
+# Boot validation — fail fast if secrets are missing
+_missing = [k for k, v in {
+    "SMARTTHINGS_PAT": SMARTTHINGS_PAT,
+    "SMARTTHINGS_DEVICE_ID": SMARTTHINGS_DEVICE_ID,
+}.items() if not v]
+
+if _missing:
+    import warnings
+    warnings.warn(
+        f"[Jarvis/Config] SmartThings secrets not set: {', '.join(_missing)}. "
+        "AC control will be unavailable until these are configured.",
+        RuntimeWarning,
+        stacklevel=2,
+    )

@@ -58,6 +58,7 @@ class CommandProcessor:
             AutomationSkill, ShortcutsSkill, InteractionSkill, ArchitectSkill,
             ReminderSkill, AnalyticsSkill, TranslatorSkill, AlarmSkill
         )
+        from modules.skills.smartthings_skill import SmartThingsSkill
         
         # Phase 5: NLP Intent Engine
         from modules.intent_router import IntentRouter
@@ -102,6 +103,7 @@ class CommandProcessor:
         
         # 5. Register Skills (Priority Order)
         # High Priority: Interaction (Stop/Exit/Hi) & System
+        self.skills.append(SmartThingsSkill(self.app_context))
         self.skills.append(InteractionSkill(self.app_context))
         self.skills.append(SystemSkill(self.app_context)) 
         self.skills.append(FocusSkill(self.app_context))
@@ -269,10 +271,12 @@ class CommandProcessor:
         # 1. Normalize
         # (Optional: remove punctuation manually if not handled by skills)
         
+        # Bypass Fuzzy Match if SmartThings handles it natively
+        ac_skill = next((s for s in self.skills if s.__class__.__name__ == "SmartThingsSkill"), None)
+        bypass_fuzzy = ac_skill and ac_skill.can_handle(cmd)
+
         # 2. Fuzzy Match Correction
-        # If the command isn't handled by any skill directly, maybe it's a typo of a known command?
-        # But we must be careful not to strip arguments from commands like "execute meow" -> "execute"
-        if self.command_phrases:
+        if self.command_phrases and not bypass_fuzzy:
             # Shield common affirmations from fuzzy stripping (prevent "yes" -> "bye")
             affirmations = ["yes", "no", "ok", "okay", "yeah", "yep", "sure", "nope", "wait"]
             if cmd in affirmations:
@@ -580,6 +584,40 @@ class CommandProcessor:
                 result = calc.calculate(inp['expression'])
                 return f"Calculation Result: {result}"
 
+        class ACControlTool:
+            name = "control_ac"
+            description = "Controls the Samsung air conditioner via SmartThings. Input: {'action': 'turn_on'|'turn_off'|'set_temperature'|'set_mode'|'get_status', 'temperature_celsius': float (optional), 'mode': str (optional: 'cool'|'heat'|'auto'|'dry'|'fanOnly')}"
+            def __init__(self, cp): self.cp = cp
+            def run(self, inp):
+                try:
+                    from modules.smartthings import SmartThingsManager
+                    manager = getattr(self.cp, '_smartthings_manager', None)
+                    if not manager:
+                        self.cp._smartthings_manager = SmartThingsManager()
+                        manager = self.cp._smartthings_manager
+                    
+                    action = inp.get("action")
+                    if action == "turn_on":
+                        manager.turn_on()
+                        return "The AC has been turned on."
+                    elif action == "turn_off":
+                        manager.turn_off()
+                        return "The AC has been turned off."
+                    elif action == "set_temperature":
+                        temp = float(inp.get("temperature_celsius", 24))
+                        manager.set_temperature(temp)
+                        return f"The AC temperature has been set to {temp}°C."
+                    elif action == "set_mode":
+                        mode = inp.get("mode", "cool")
+                        manager.set_mode(mode)
+                        return f"The AC mode has been set to {mode}."
+                    elif action == "get_status":
+                        status = manager.get_status()
+                        return f"AC is {status.get('switch')}. Room temp: {status.get('temperature')}°C. Setpoint: {status.get('coolingSetpoint')}°C. Mode: {status.get('airConditionerMode')}."
+                    return f"Unknown AC action: '{action}'."
+                except Exception as e:
+                    return f"AC control failed: {str(e)}"
+
         class AppControlTool:
             name = "control_app"
             description = "Open or quit macOS applications. Input: {'action': 'open'|'quit', 'app_name': str}. Example: {'action': 'open', 'app_name': 'Safari'}"
@@ -773,6 +811,7 @@ class CommandProcessor:
         reg(ReminderTool)
         reg(AlarmTool)
         reg(CalculatorTool)
+        reg(ACControlTool)
         reg(AppControlTool)
         reg(SystemControlTool)
         reg(TranslatorTool)

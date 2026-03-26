@@ -149,11 +149,11 @@ class IntentRouter:
             return self._ok(self.ACTION_GENERAL_CONVERSATION, 0.9, "Communication keyword")
 
         # Weather
-        if (words & {"weather", "forecast", "temperature", "rain", "humidity"}) and not ({"build", "create", "make", "develop"} & words):
+        if (unique_words & {"weather", "forecast", "temperature", "rain", "humidity"}) and not ({"build", "create", "make", "develop"} & unique_words):
             return self._ok(self.ACTION_GENERAL_CONVERSATION, 0.9, "Weather keyword")
 
         # Time / Date
-        if words & {"time", "date", "clock", "today", "tomorrow"} and len(words) <= 6:
+        if unique_words & {"time", "date", "clock", "today", "tomorrow"} and len(unique_words) <= 6:
             return self._ok(self.ACTION_GENERAL_CONVERSATION, 0.9, "Time/date keyword")
 
         # Alarms / Reminders
@@ -169,7 +169,7 @@ class IntentRouter:
             return self._ok(self.ACTION_GENERAL_CONVERSATION, 0.9, "Translator keyword")
 
         # News
-        if words & {"news", "headlines"} or (words & {"latest"} and words & {"news", "headlines", "stories", "updates"}):
+        if unique_words & {"news", "headlines"} or (unique_words & {"latest"} and unique_words & {"news", "headlines", "stories", "updates"}):
             return self._ok(self.ACTION_GENERAL_CONVERSATION, 0.9, "News keyword")
 
         # Focus / DND
