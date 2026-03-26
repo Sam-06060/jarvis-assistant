@@ -19,6 +19,7 @@ class AudioRecorder:
         
         self.is_interrupted = False
         self.last_record_status = "idle"
+        self.consecutive_read_failures = 0
         
         # Initialize PyAudio
         self._init_audio()
@@ -42,10 +43,26 @@ class AudioRecorder:
                 time.sleep(1)
         logger.critical("Failed to init PyAudio")
 
+    def _reinit_audio_system(self):
+        """Completely restart PortAudio to pick up new default devices after a disconnect."""
+        logger.warning("🔄 Re-initializing Audio System (Device change/disconnect detected)...")
+        self.close_stream()
+        if self.pa:
+            try:
+                self.pa.terminate()
+            except Exception: pass
+            self.pa = None
+        time.sleep(0.5)
+        self._init_audio()
+        self.consecutive_read_failures = 0
+
     def open_stream(self):
         """Opens audio stream if not open"""
         if self.stream and self.stream.is_active():
             return self.stream
+
+        if getattr(self, 'pa', None) is None:
+            self._init_audio()
 
         try:
              self.stream = self.pa.open(
@@ -82,7 +99,11 @@ class AudioRecorder:
     def read_chunk(self):
         """Reads a single chunk from stream, enforcing strict buffer sizes."""
         if not self.stream: self.open_stream()
-        if not self.stream: return None
+        if not self.stream:
+            self.consecutive_read_failures += 1
+            if self.consecutive_read_failures > 15:
+                self._reinit_audio_system()
+            return None
 
         try:
             # PyAudio read defaults to blocking
@@ -94,18 +115,31 @@ class AudioRecorder:
             # reject it and force a micro-sleep to prevent a CPU spin-loop.
             expected_bytes = self.chunk * 2 
             if not data or len(data) != expected_bytes:
+                self.consecutive_read_failures += 1
+                if self.consecutive_read_failures > 15:
+                    self._reinit_audio_system()
                 time.sleep(0.01) # Force the CPU to rest during a driver glitch
                 return None
 
+            self.consecutive_read_failures = 0
             return data
 
-        except IOError:
+        except IOError as e:
             # Catches PortAudio buffer underflows/overflows cleanly without thrashing
-            time.sleep(0.01)
+            self.consecutive_read_failures += 1
+            if self.consecutive_read_failures > 15:
+                logger.debug(f"IOError threshold reached: {e}")
+                self._reinit_audio_system()
+            else:
+                time.sleep(0.01)
             return None
         except Exception as e:
             logger.warning(f"Read error: {e}")
-            time.sleep(0.1)
+            self.consecutive_read_failures += 1
+            if self.consecutive_read_failures > 15:
+                self._reinit_audio_system()
+            else:
+                time.sleep(0.1)
             return None
 
     def record_until_silence(self, max_duration=30, silence_threshold=0.6, hud_queue=None):
@@ -153,9 +187,20 @@ class AudioRecorder:
         while True:
             # 1. Read audio chunk
             data = self.read_chunk()
-            if not data: break
             
             elapsed = time.time() - start_time
+            
+            if not data:
+                if self.is_interrupted:
+                    self.close_stream()
+                    self.last_record_status = "interrupted"
+                    return None
+                if elapsed > max_duration or (not speech_started and elapsed > 7.0):
+                    timeout_triggered = True
+                    logger.debug("❌ Timeout during audio failure/recovery")
+                    break
+                continue
+
             frames.append(data)
 
             # 2. Check Interruption
