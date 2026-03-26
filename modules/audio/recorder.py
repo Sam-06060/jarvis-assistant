@@ -4,7 +4,32 @@ import wave
 import struct
 import threading
 import config
+import os
+import sys
+from contextlib import contextmanager
 from utils.logger import get_logger
+
+@contextmanager
+def suppress_c_warnings():
+    """Suppresses C-level stderr messages (like PortAudio's PaMacCore AUHAL -50 errors)."""
+    supported = False
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        old_stderr = os.dup(sys.stderr.fileno())
+        sys.stderr.flush()
+        os.dup2(devnull, sys.stderr.fileno())
+        supported = True
+    except Exception:
+        pass
+    
+    try:
+        yield
+    finally:
+        if supported:
+            sys.stderr.flush()
+            os.dup2(old_stderr, sys.stderr.fileno())
+            os.close(devnull)
+            os.close(old_stderr)
 
 logger = get_logger()
 
@@ -36,7 +61,8 @@ class AudioRecorder:
     def _init_audio(self):
         for attempt in range(3):
             try:
-                self.pa = pyaudio.PyAudio()
+                with suppress_c_warnings():
+                    self.pa = pyaudio.PyAudio()
                 return
             except Exception as e:
                 logger.warning(f"Audio Init fail ({attempt}): {e}")
@@ -58,24 +84,44 @@ class AudioRecorder:
 
     def open_stream(self):
         """Opens audio stream if not open"""
-        if self.stream and self.stream.is_active():
-            return self.stream
+        try:
+            if self.stream and self.stream.is_active():
+                return self.stream
+        except Exception:
+            self.close_stream()
 
         if getattr(self, 'pa', None) is None:
             self._init_audio()
 
         try:
-             self.stream = self.pa.open(
-                rate=self.rate,
-                channels=self.channels,
-                format=self.format,
-                input=True,
-                frames_per_buffer=self.chunk
-            )
+             with suppress_c_warnings():
+                 self.stream = self.pa.open(
+                    rate=self.rate,
+                    channels=self.channels,
+                    format=self.format,
+                    input=True,
+                    frames_per_buffer=self.chunk
+                )
              return self.stream
         except Exception as e:
             logger.error(f"Failed to open stream: {e}")
-            return None
+            logger.warning("Triggering forced re-init of PyAudio to recover from Internal PortAudio Error.")
+            self._reinit_audio_system()
+            
+            # Retry one more time after fresh init
+            try:
+                 with suppress_c_warnings():
+                     self.stream = self.pa.open(
+                        rate=self.rate,
+                        channels=self.channels,
+                        format=self.format,
+                        input=True,
+                        frames_per_buffer=self.chunk
+                    )
+                 return self.stream
+            except Exception as e2:
+                 logger.error(f"Failed to open stream AFTER REINIT: {e2}")
+                 return None
 
     def close_stream(self):
         if self.stream:
@@ -106,13 +152,20 @@ class AudioRecorder:
             return None
 
         try:
-            # PyAudio read defaults to blocking
+            # PREVENT DEADLOCK: Don't call blocking read() if stream is stuck.
+            available = self.stream.get_read_available()
+            if available < self.chunk:
+                self.consecutive_read_failures += 1
+                if self.consecutive_read_failures > 50: # ~500ms of no audio
+                    logger.debug("Stream froze (0 frames available). Forcing re-init.")
+                    self._reinit_audio_system()
+                time.sleep(0.01)
+                return None
+
+            # PyAudio read defaults to blocking, but we just ensured it won't block forever
             data = self.stream.read(self.chunk, exception_on_overflow=False)
 
             # THE FIX: Apple Silicon CoreAudio Quirk Protection
-            # 512 frames * 2 bytes (16-bit format) = 1024 bytes.
-            # If CoreAudio desyncs and hands us a partial frame or empty bytes,
-            # reject it and force a micro-sleep to prevent a CPU spin-loop.
             expected_bytes = self.chunk * 2 
             if not data or len(data) != expected_bytes:
                 self.consecutive_read_failures += 1
@@ -125,7 +178,7 @@ class AudioRecorder:
             return data
 
         except IOError as e:
-            # Catches PortAudio buffer underflows/overflows cleanly without thrashing
+            # Catches PortAudio buffer underflows/overflows cleanly
             self.consecutive_read_failures += 1
             if self.consecutive_read_failures > 15:
                 logger.debug(f"IOError threshold reached: {e}")
