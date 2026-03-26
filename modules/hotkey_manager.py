@@ -1,5 +1,7 @@
 import time
 from pynput import keyboard
+from utils.logger import get_logger
+logger = get_logger()
 
 class HotkeyManager:
     def __init__(self, on_single_tap=None, on_double_tap=None):
@@ -18,14 +20,14 @@ class HotkeyManager:
         
     def start(self):
         """Start the global keyboard listener in a background thread"""
-        print("⌨️ Starting Global Hotkey Listener...")
+        logger.info("⌨️ Starting Global Hotkey Listener...")
         try:
             # Removed on_press to simplify. on_release is enough for Taps.
             self.listener = keyboard.Listener(on_release=self.on_release)
             self.listener.start()
-            print("✅ Hotkey Listener Active")
+            logger.info("✅ Hotkey Listener Active")
         except Exception as e:
-            print(f"❌ Hotkey Start Error: {e}")
+            logger.error(f"❌ Hotkey Start Error: {e}")
         
     def stop(self):
         """Stop the listener"""
@@ -54,13 +56,13 @@ class HotkeyManager:
                 
                 # Check for Double Tap (within 0.4s)
                 if (curr_time - self.last_tap_time) < 0.4:
-                    print("⌨️ Double Tap Detected!")
+                    logger.info("⌨️ Double Tap Detected!")
                     self.tap_count = 0
                     self.last_tap_time = 0
                     if self.on_double_tap:
                         self.on_double_tap()
                 else:
-                    print("⌨️ Single Tap Detected")
+                    logger.info("⌨️ Single Tap Detected")
                     self.tap_count = 1
                     self.last_tap_time = curr_time
                     if self.on_single_tap:

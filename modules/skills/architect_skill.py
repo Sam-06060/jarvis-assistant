@@ -4,7 +4,9 @@ import re
 import datetime
 import threading
 import time
+import logging
 
+logger = logging.getLogger(__name__)
 
 class ArchitectSkill(Skill):
     """
@@ -87,11 +89,196 @@ class ArchitectSkill(Skill):
         Bypasses regex checks and uses intent data for context.
         """
         intent = intent_data.get("intent")
-        print(f"🧠 Architect triggered via NLP: {intent}")
+        logger.info(f"🧠 Architect triggered via NLP: {intent}")
         
         self.speech.speak("Architect Protocol Initiated via Neural Link...")
         threading.Thread(target=self._run_architect, args=(command, intent), daemon=True).start()
         return "STOP_LISTENING"  # Auto-sleep while Architect generates in background
+
+    # ============================================================
+    # V2 ITERATIVE PIPELINE (Architect V2)
+    # ============================================================
+    def _run_v2_pipeline(self, command, system_prompt, is_iteration, groq_instance):
+        """
+        The Iterative Beast — Generates large projects in 20K token slots.
+        """
+        self.brain = self.app.get('brain')
+        provider = groq_instance if groq_instance.available else self.brain
+        
+        # Phase 1: Blueprint
+        self.speech.speak("Designing V2 project blueprint...")
+        blueprint = self._generate_v2_blueprint(command, system_prompt, provider)
+        if not blueprint:
+             self.speech.speak("Blueprint generation failed. Falling back to legacy pass.")
+             return False # Signal fallback
+
+        # Phase 2: Iterative Slot Generation
+        project_files = []
+        remaining_files = blueprint.copy()
+        generated_meta = []
+        
+        iteration = 1
+        while remaining_files:
+            logger.info(f"🚀 V2 Iteration {iteration}: {len(remaining_files)} files remaining.")
+            self.speech.speak(f"Construction phase {iteration} initiated...")
+
+            # Select batch for 20K token slot
+            # Reduced to 1-2 files for maximum reliability/budget per file
+            batch_size = 2 if len(remaining_files) > 5 else 1
+            batch = remaining_files[:batch_size]
+            remaining_files = remaining_files[batch_size:]
+
+            slot_code = self._generate_v2_slot(command, system_prompt, batch, generated_meta, provider)
+            if not slot_code:
+                logger.warning(f"⚠️ Slot failed in iteration {iteration}. Retrying...")
+                remaining_files = batch + remaining_files
+                continue
+
+            # Parse & Safe-Cut Guard
+            slot_matches = self._parse_v2_slot(slot_code, batch)
+            
+            if slot_matches:
+                # INCREMENTAL SAVING: Write these files to the desktop IMMEDIATELY
+                logger.info(f"📂 V2 Incremental Save: Writing {len(slot_matches)} files...")
+                # We use is_iteration=True for subsequent slots to keep writing to the same folder
+                current_is_iteration = is_iteration if iteration == 1 else True
+                self._incremental_build_v2(slot_matches, command, current_is_iteration)
+                
+                for fname, content in slot_matches:
+                    project_files.append((fname, content))
+                    generated_meta.append(f"{fname} ({len(content)} bytes)")
+                    logger.info(f"   ✅ V2 Structured: {fname}")
+
+            iteration += 1
+            if iteration > 15: 
+                logger.warning("🏁 Global safety break triggered (limit 15 iterations).")
+                break 
+
+        # Phase 3: Final Verification
+        self.speech.speak("Performing final project integrity check...")
+        logger.info("🔍 V2 Final Verification Phase...")
+        missing_files = []
+        for f in blueprint:
+            if not any(pf[0] == f['file'] for pf in project_files):
+                missing_files.append(f['file'])
+        
+        if missing_files:
+            logger.warning(f"⚠️ Missing files detected: {missing_files}. Triggering recovery...")
+            self.speech.speak("I noticed some missing components. Recovering now...")
+            # Brief recovery call for missing files
+            recovery_batch = [{"file": f, "purpose": "Recovering missing file"} for f in missing_files]
+            recovery_code = self._generate_v2_slot(command, system_prompt, recovery_batch, generated_meta, provider)
+            recovery_matches = self._parse_v2_slot(recovery_code, recovery_batch)
+            if recovery_matches:
+                self._incremental_build_v2(recovery_matches, command, True)
+                logger.info(f"✅ Recovery successful for {len(recovery_matches)} files.")
+
+        self.speech.speak("Project construction and verification complete.")
+        return True
+
+    def _generate_v2_blueprint(self, command, system_prompt, provider):
+        """Map out the entire project structure first."""
+        logger.info("🗺️  Generating Blueprint...")
+        prompt = f"""
+USER REQUEST: {command}
+
+You are a Lead Architect. Define the full production-ready file structure for this request.
+Include every component, route, and config file needed.
+
+OUTPUT FORMAT (JSON ONLY):
+[
+  {{"file": "filename.ext", "purpose": "description"}},
+  ...
+]
+"""
+        response = provider.generate_code(prompt=prompt, system_prompt=system_prompt) if hasattr(provider, 'generate_code') else provider.ask(prompt, system_prompt=system_prompt)
+        
+        if not response:
+            logger.error("❌ Blueprint Response Empty.")
+            return None
+
+        blueprint = self._extract_json_array(response)
+        if blueprint:
+            logger.info(f"✅ Blueprint mapped: {len(blueprint)} files identified.")
+            return blueprint
+        else:
+            logger.error(f"❌ Blueprint JSON Parse Error. Raw Output:\n{response}")
+            return None
+
+    def _extract_json_array(self, text):
+        """
+        Extremely robust JSON array extractor.
+        Handles markdown backticks, trailing text, and partial blocks.
+        """
+        import json
+        text = text.strip()
+        
+        # 1. Try direct find for any array [ ] structure
+        # We find the FIRST [ and the LAST ] that balances it.
+        start = text.find('[')
+        end = text.rfind(']')
+        
+        if start != -1 and end != -1:
+            json_str = text[start:end+1]
+            try:
+                return json.loads(json_str)
+            except json.JSONDecodeError:
+                # 2. Try cleaning common offenders (markdown, extra text)
+                # Look for the last valid ] if there's trailing garbage
+                while end > start:
+                    try:
+                        return json.loads(text[start:end+1])
+                    except:
+                        end = text.rfind(']', start, end)
+        
+        # 3. Last ditch: regex search for anything resembling an array
+        match = re.search(r'\[\s*\{.*\}\s*\]', text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except: pass
+            
+        return None
+
+    def _generate_v2_slot(self, command, system_prompt, batch, generated_meta, provider):
+        """Generate a cluster of files."""
+        file_list = "\n".join([f"- {f['file']}: {f['purpose']}" for f in batch])
+        context = "\n".join(generated_meta)
+        
+        prompt = f"""
+PROJECT: {command}
+ALREADY GENERATED:
+{context if context else "(None)"}
+
+YOUR TASK: Write COMPLETE code for these files:
+{file_list}
+
+V2 RULES:
+1. OUTPUT RAW XML ONLY: <file name="filename">...</file>
+2. 20K SLOT: If you hit token limits, stop only AFTER a complete file.
+3. NO STUBS: Full production code only.
+"""
+        return provider.generate_code(prompt=prompt, system_prompt=system_prompt) if hasattr(provider, 'generate_code') else provider.ask(prompt, system_prompt=system_prompt)
+
+    def _parse_v2_slot(self, response, batch):
+        """Extract files with Safe-Cut protection."""
+        matches = re.findall(r'<file name="(.*?)">(.*?)</file>', response, re.DOTALL)
+        
+        if not matches:
+             logger.error(f"❌ V2 Slot Parsing Failed. Expected files: {[f['file'] for f in batch]}. Raw Response:\n{response}")
+             return []
+
+        valid = []
+        for name, content in matches:
+            if content.strip().endswith('...'):
+                logger.warning(f"⚠️ Safe-Cut: {name} incomplete. Deferring to next slot.")
+                continue
+            valid.append((name.strip(), content.strip()))
+        return valid
+
+    def _incremental_build_v2(self, project_files, command, is_iteration):
+        """Bridge to existing build logic for incremental writes."""
+        self._build_project_actual(None, command, is_iteration=is_iteration, matches=project_files)
 
     def _run_architect(self, command, intent=None):
         brain = self.app.get('brain')
@@ -112,7 +299,7 @@ class ArchitectSkill(Skill):
                     last_built = max(dirs, key=os.path.getmtime)
                     if os.listdir(last_built):
                         self.last_project_path = last_built
-                        print(f"🔄 Restored context from latest build: {self.last_project_path}")
+                        logger.info(f"🔄 Restored context from latest build: {self.last_project_path}")
 
         # 2. DETERMINE MODE (NEW vs MINOR vs MAJOR)
         mode = "NEW"
@@ -126,20 +313,19 @@ class ArchitectSkill(Skill):
             # PHASE 8.3: Clean slate for new projects
             # Prevents auto-recovery from polluting the next build
             self.last_project_path = None
-            print("🧹 Context cleared for new project.")
+            logger.info("🧹 Context cleared for new project.")
             
-        print(f"🏗️ Architect Mode: {mode}")
+        logger.info(f"🏗️ Architect Mode: {mode}")
 
         # 3. LOAD CONTEXT (If Update)
         if mode in ["MINOR", "MAJOR"] and self.last_project_path:
-            print(f"🔄 Iteration/Overhaul detected on: {self.last_project_path}")
+            logger.info(f"🔄 Iteration/Overhaul detected on: {self.last_project_path}")
             previous_context = self._load_project_context(self.last_project_path)
             if previous_context:
                 is_iteration = True
                 self.speech.speak("Loading previous project context...")
 
 
-        # ============== SYSTEM PROMPT SELECTION ==============
         if mode == "MINOR":
             # DIGITAL SURGEON MODE (Precise Tweaks)
             system_prompt = """
@@ -167,7 +353,6 @@ CRITICAL RULES:
             # CREATIVE ARCHITECT MODE (New Build OR Major Redesign)
             # Used for "NEW" and "MAJOR" (Recreate)
             system_prompt = """
-
 3. **FLUID & SCALABLE DESIGN (Crucial)**:
    - **NO FIXED WIDTHS**: Never use `width: 400px` for main containers. Use `width: min(90%, 1400px)` or `max-width`.
    - **FLUID TYPOGRAPHY**: Use `clamp(2rem, 5vw, 5rem)` for headings. Use `rem` for body text.
@@ -187,128 +372,33 @@ content
 Failure to separate files or producing "basic/fixed" code is UNACCEPTABLE.
 """
 
-        # ============== STAGE 1: INITIAL GENERATION ==============
-        current_code = None
-        source = "unknown"
-        
-        # Inject Context logic
-        full_user_prompt = command + " (OUTPUT RAW XML ONLY. Separate files using <file name=\"...\">...</file> tags. Make it fluid & beautiful.)"
-        
-        if is_iteration:
-            # Phase 1.2: Load Stack from Manifest
-            stack_hint = ""
-            if self.last_project_path:
-                try:
-                    import json
-                    m_path = os.path.join(self.last_project_path, "jarvis_manifest.json")
-                    if os.path.exists(m_path):
-                        with open(m_path) as f:
-                            data = json.load(f)
-                            stack = data.get("stack", "unknown")
-                            if stack != "unknown":
-                                stack_hint = f"\n⚠️ IMPORTANT: This project uses {stack.upper()}. Do NOT change the technology stack."
-                except: pass
-
-            full_user_prompt = f"""
-PREVIOUS PROJECT CONTEXT:
-{previous_context}
-
-USER REQUEST: {command}
-{stack_hint}
-
-INSTRUCTIONS:
-1. Update the code above based on the request.
-2. Output the FULL updated files (don't output diffs, output the complete file content).
-3. Maintain the existing file structure.
-            """
-
-        # Try Cloud AI (OpenRouter → Groq fallback)
+        # ============== STAGE 1: V2 PIPELINE (ITERATIVE) ==============
+        # We always use V2 for Major/New requests to handle scale.
         try:
             from modules.groq_client import GroqClient
             groq = GroqClient()
             
-            if groq.available:
-                self.speech.speak("Designing scalable high-fidelity prototype via cloud AI...")
-                current_code = groq.generate_code(
-                    prompt=full_user_prompt,
-                    system_prompt=system_prompt
-                )
-                if current_code:
-                    source = "cloud"
-                    print(f"☁️ Initial generation: {len(current_code)} chars")
-                    
-                    # ============== STAGE 1.5: STUB DETECTION ==============
-                    # Check if files are stubs (the "..." problem)
-                    stub_count = self._count_stubs(current_code)
-                    if stub_count > 0:
-                        print(f"⚠️ Detected {stub_count} stub file(s). Switching to Multi-Pass Mode...")
-                        self.speech.speak(f"Detected incomplete files. Expanding {stub_count} files individually...")
-                        current_code = self._multi_pass_generate(command, system_prompt, groq, current_code)
-                        source = "cloud-multipass"
-                        print(f"🔄 Multi-pass generation complete: {len(current_code)} chars")
-                        
+            # Initiate V2 Pipeline
+            success = self._run_v2_pipeline(command, system_prompt, is_iteration, groq)
+            
+            if not success:
+                 # Legacy Fallback logic if V2 fails
+                 self.speech.speak("V2 blueprint failed. Using legacy single-pass...")
+                 current_code = brain.ask_local_ollama(
+                     command + " (OUTPUT RAW XML ONLY)", 
+                     system_prompt=system_prompt
+                 )
+                 self._build_project_actual(current_code, command, is_iteration=is_iteration)
+
         except Exception as e:
-            print(f"⚠️ Cloud AI init failed: {e}")
-        
-        # Fallback to local Ollama
-        if not current_code:
-            self.speech.speak("Using local brain for code generation...")
-            current_code = brain.ask_local_ollama(
-                full_user_prompt + " (OUTPUT RAW XML ONLY)", 
-                system_prompt=system_prompt
-            )
-            source = "ollama"
-            print(f"🏠 Ollama returned {len(current_code) if current_code else 0} chars")
-        
-        if not current_code:
-            self.speech.speak("Code generation failed. Please try again.")
-            return
-
-        # ============== STAGE 2: VERIFICATION (skip for multi-pass) ==============
-        if source == "cloud" and groq.available:
-             max_passes = 5
-             for i in range(1, max_passes + 1):
-                 self.speech.speak(f"Reviewing design & scalability. Pass {i} of {max_passes}...")
-                 print(f"🔍 Verification Pass {i}/{max_passes}...")
-                 
-                 review_prompt = f"""
-CRITICAL DESIGN REVIEW (Pass {i}/{max_passes}):
-
-USER REQUEST: "{command}"
-
-Review the generated code against the User Request & Design Standards:
-1. **FILE SEPARATION (Crucial)**: Check files are properly separated.
-2. **COMPLETENESS**: Are ALL files fully implemented (no stubs, no "...")?
-3. **SCALABILITY CHECK**: Fluid containers, responsive design?
-
-If ANY issues are found, re-write the FULL code.
-If the code is **PERFECT**, output ONLY: "NO ISSUES".
-
-CURRENT CODE:
-{current_code}
-"""
-                 reviewed_code = groq.generate_code(prompt=review_prompt, system_prompt=system_prompt)
-                 
-                 if not reviewed_code:
-                     print(f"⚠️ Review pass {i} failed. Keeping previous code.")
-                     break
-                 
-                 if "NO ISSUES" in reviewed_code and len(reviewed_code) < 100:
-                     print(f"✅ Code verified as PERFECT on pass {i}.")
-                     self.speech.speak("Design verification complete. No issues found.")
-                     break
-                 else:
-                     print(f"🛠️  Refining design on pass {i}...")
-                     current_code = reviewed_code
-                     if i == max_passes:
-                         self.speech.speak("Final polish complete. Proceeding to build.")
-
-        # ============== STAGE 3: PARSE & BUILD ==============
-        self.speech.speak("Structuring verified project files...")
-        self._build_project(current_code, command, source, is_iteration)
+            logger.error(f"❌ V2 Pipeline Error: {e}")
+            self.speech.speak("Architect V2 encountered an error. Falling back.")
+            # Final safety fallback
+            current_code = brain.ask_local_ollama(command, system_prompt=system_prompt)
+            self._build_project_actual(current_code, command, is_iteration=is_iteration)
 
     # ============================================================
-    # MULTI-PASS GENERATION (Stage 9)
+    # MULTI-PASS GENERATION (Legacy Stage 9)
     # ============================================================
     def _count_stubs(self, code: str) -> int:
         """Count how many <file> blocks contain stubs (... or very short content)."""
@@ -337,10 +427,10 @@ CURRENT CODE:
         files = re.findall(r'<file\s+name="([^"]+)">\s*(.*?)\s*</file>', initial_code, re.DOTALL)
         
         if not files:
-            print("⚠️ Multi-pass: No files found in initial output. Using single-pass result.")
+            logger.warning("⚠️ Multi-pass: No files found in initial output. Using single-pass result.")
             return initial_code
         
-        print(f"🔄 Multi-Pass Mode: {len(files)} files to generate individually")
+        logger.info(f"🔄 Multi-Pass Mode: {len(files)} files to generate individually")
         
         # Build file list for context
         file_list = "\n".join([f"  - {name}" for name, _ in files])
@@ -356,11 +446,11 @@ CURRENT CODE:
                 # This file already has real content, keep it
                 all_code_parts.append(f'<file name="{filename}">\n{existing_content}\n</file>')
                 generated_so_far.append(f"  - {filename} (already generated)")
-                print(f"   ✅ Kept existing: {filename} ({len(existing_content)} chars)")
+                logger.info(f"   ✅ Kept existing: {filename} ({len(existing_content)} chars)")
                 continue
             
             # Generate this file individually
-            print(f"   🔨 Generating [{i+1}/{len(files)}]: {filename}")
+            logger.info(f"   🔨 Generating [{i+1}/{len(files)}]: {filename}")
             self.speech.speak(f"Writing {filename}...")
             
             # Build context-aware prompt for this specific file
@@ -395,9 +485,9 @@ RULES:
                 
                 all_code_parts.append(f'<file name="{filename}">\n{file_code}\n</file>')
                 generated_so_far.append(f"  - {filename} ({len(file_code)} chars)")
-                print(f"   ✅ Generated: {filename} ({len(file_code)} chars)")
+                logger.info(f"   ✅ Generated: {filename} ({len(file_code)} chars)")
             else:
-                print(f"   ❌ Failed to generate: {filename}")
+                logger.error(f"   ❌ Failed to generate: {filename}")
                 all_code_parts.append(f'<file name="{filename}">\n// Generation failed for {filename}\n</file>')
                 generated_so_far.append(f"  - {filename} (FAILED)")
         
@@ -417,7 +507,7 @@ RULES:
                         context.append(f'<file name="{rel_path}">\n{content}\n</file>')
             return "\n".join(context)
         except Exception as e:
-            print(f"⚠️ Failed to load previous context: {e}")
+            logger.error(f"⚠️ Failed to load previous context: {e}")
             return ""
 
     def _get_next_version_name(self, directory, filename):
@@ -447,70 +537,60 @@ RULES:
             
         return f"{name}_v{max_v + 1}{ext}"
 
-    def _build_project(self, llm_response, original_command, source="unknown", is_iteration=False):
-        """Parse XML file blocks and save to ~/Desktop/Jarvis_Builds/"""
+    def _build_project_actual(self, llm_response, original_command, source="unknown", is_iteration=False, matches=None):
+        """
+        Final construction phase. 
+        Accepts:
+          - llm_response: Raw XML string (Legacy)
+          - matches: Pre-parsed (name, content) list (V2)
+        """
         import shutil
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        from datetime import datetime # Added for datetime.now()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
+        # 1. SETUP PATHS
         if is_iteration and self.last_project_path and os.path.exists(self.last_project_path):
-             # STAGE 4: ATOMIC FOLDER VERSIONING
-             # 1. New Folder Name
              base_name = os.path.basename(self.last_project_path)
-             # Strip existing timestamp or version suffix if needed, but easier to just append _v2
-             # Or better: Parsing the v-number
-             
-             # Regex to find _v(\d+) at end of name
              match = re.search(r'_v(\d+)$', base_name)
              if match:
                  v = int(match.group(1))
                  new_name = re.sub(r'_v\d+$', f'_v{v+1}', base_name)
              else:
-                 # First iteration: Append _v2
                  new_name = f"{base_name}_v2"
              
              parent_dir = os.path.dirname(self.last_project_path)
              base_path = os.path.join(parent_dir, new_name)
              
-             print(f"🔄 Creating Atomic Snapshot: {base_path}")
-             
-             # 2. Copy Previous State (The Skeleton)
+             logger.info(f"🔄 V2 Snapshot: {base_path}")
              try:
                  shutil.copytree(self.last_project_path, base_path)
-                 print(f"   📋 Copied state from {base_name}")
              except Exception as e:
-                 print(f"⚠️ Snapshot copy failed: {e}")
-                 # Fallback: Just create folder, but we lose history. 
-                 # Better to crash or handle? Let's try to proceed.
+                 logger.error(f"⚠️ Snapshot copy failed: {e}") # Added missing print for error
                  os.makedirs(base_path, exist_ok=True)
-
              project_name = new_name
              
         else:
-            # CREATE NEW FOLDER (New Project)
-            project_name = self._generate_project_name(original_command)
-            builds_dir = os.path.expanduser("~/Desktop/Jarvis_Builds")
-            # Clean name if it has _v argument? No, _generate handles it.
-            base_path = os.path.join(builds_dir, f"{project_name}_{timestamp}")
-            # Ensure no collision
-            os.makedirs(base_path, exist_ok=True)
-            print(f"📂 Created Project Folder: {base_path}")
-        
-        # Extract files using Regex
-        pattern = r'<file name="(.*?)">(.*?)</file>'
-        matches = re.findall(pattern, llm_response, re.DOTALL)
-        
-        if not matches:
-            # Stage 3B: If XML parsing fails, try to fix it with Ollama
-            print("⚠️ XML parsing failed. Attempting repair with Ollama...")
-            matches = self._repair_with_ollama(llm_response)
-        
-        if not matches:
-            self.speech.speak("Code was generated, but I couldn't parse the file structure. Check the logs.")
-            print(f"❌ Architect Failure. Source: {source}. Raw output:\n{llm_response[:1000]}")
-            return
+             project_name = self._generate_project_name(original_command)
+             builds_dir = os.path.expanduser("~/Desktop/Jarvis_Builds")
+             base_path = os.path.join(builds_dir, f"{project_name}_{timestamp}")
+             os.makedirs(base_path, exist_ok=True)
+             logger.info(f"📂 V2 Project Folder: {base_path}")
 
-        # Phase 3.4: Critical File Verification (New Project Guard)
-        # If we have CSS/JS but no HTML in a new project, force generation
+        # 2. EXTRACT FILES (If not already provided via V2)
+        if not matches:
+            pattern = r'<file name="(.*?)">(.*?)</file>'
+            matches = re.findall(pattern, llm_response, re.DOTALL)
+            
+            if not matches:
+                logger.warning("⚠️ XML parsing failed. Attempting repair with Ollama...")
+                matches = self._repair_with_ollama(llm_response)
+            
+            if not matches:
+                self.speech.speak("Code was generated, but I couldn't parse the file structure. Check the logs.")
+                logger.error(f"❌ Architect Failure. Source: {source}. Raw output:\n{llm_response[:1000]}")
+                return
+
+        # 3. VERIFY & WRITE
         matches = self._ensure_critical_files(matches, original_command)
 
         # Create Directory & Write Files
@@ -559,7 +639,7 @@ RULES:
                              continue
                              
                      except Exception as e:
-                         print(f"⚠️ Integrity check error: {e}")
+                         logger.error(f"⚠️ Integrity check error: {e}")
 
                 # Verify directory exists (again, safety)
                 if file_dir and not os.path.exists(file_dir):
@@ -568,7 +648,7 @@ RULES:
                 with open(full_path, "w", encoding="utf-8") as f:
                     f.write(content)
                 
-                print(f"   📄 Wrote: {os.path.basename(full_path)}")
+                logger.info(f"   📄 Wrote: {os.path.basename(full_path)}")
                 file_count += 1
             
             # GOD MODE: Save path for next iteration
@@ -585,7 +665,7 @@ RULES:
             self._update_project_manifest(base_path, original_command, file_list)
                 
             self.speech.speak(success_msg)
-            print(f"✅ {success_msg}")
+            logger.info(f"✅ {success_msg}")
             
             # Open the folder in Finder
             import subprocess
@@ -598,25 +678,29 @@ RULES:
             
         except Exception as e:
             self.speech.speak("Construction failed due to a system error.")
-            print(f"❌ Architect Error: {e}")
+            logger.error(f"❌ Architect Error: {e}")
 
     def _generate_project_name(self, command):
-        """Generate a clean project name from the user's command."""
-        # Words to remove from project name
+        # Noise: words that don't help project names
         noise_words = {
             "build", "create", "scaffold", "make", "write", "code", "generate",
             "a", "an", "the", "me", "for", "please", "can", "you", "project",
-            "program", "app", "application", "software", "tool", "using"
+            "program", "app", "application", "software", "tool", "using",
+            "are", "senior", "full-stack", "engineer", "and", "product"
         }
         
-        words = command.lower().split()
+        # Clean the string from punctuation and split
+        clean_text = re.sub(r'[^\w\s]', ' ', command)
+        words = clean_text.lower().split()
+        
         relevant = [w for w in words if w not in noise_words and len(w) > 1]
         
-        if relevant:
-            # Capitalize each word and join with underscore
-            return "_".join(w.capitalize() for w in relevant[:6])  # Max 6 words
+        if not relevant:
+            helpful_context = [w for w in words if len(w) > 2][:3]
+            relevant = helpful_context or ["Jarvis_Project"]
         
-        return "Jarvis_Project"
+        # Capitalize and join with underscore (Limit to top bits of meaning)
+        return "_".join(w.capitalize() for w in relevant[:4])
 
     def _repair_with_ollama(self, raw_response):
         """
@@ -641,10 +725,10 @@ RAW CODE:
                 pattern = r'<file name="(.*?)">(.*?)</file>'
                 matches = re.findall(pattern, repair_response, re.DOTALL)
                 if matches:
-                    print(f"✅ Ollama repair successful: {len(matches)} files extracted")
+                    logger.info(f"✅ Ollama repair successful: {len(matches)} files extracted")
                     return matches
         except Exception as e:
-            print(f"⚠️ Ollama repair failed: {e}")
+            logger.error(f"⚠️ Ollama repair failed: {e}")
         
         return []
 
@@ -685,7 +769,7 @@ RAW CODE:
                 
         with open(manifest_path, 'w') as f:
             json.dump(data, f, indent=2)
-            print(f"🧠 Project Manifest updated (v{data['version']})")
+            logger.info(f"🧠 Project Manifest updated (v{data['version']})")
 
     def _enhance_assets(self, content, file_ext):
         """
@@ -770,7 +854,7 @@ RAW CODE:
         brain = self.app.get('brain')
         if not brain: return content
         
-        print(f"🔧 Attempting Auto-Repair for syntax error: {error_msg}")
+        logger.info(f"🔧 Attempting Auto-Repair for syntax error: {error_msg}")
         
         prompt = f"""
 The following code has a syntax error: "{error_msg}"
@@ -805,7 +889,7 @@ Fix the syntax error. Return ONLY the fixed code without markdown backticks.
         has_html = any(f.endswith('.html') for f in filenames)
         
         if has_css_js and not has_html:
-            print("⚠️ MISSING CRITICAL FILE: index.html detected. Triggering emergency generation...")
+            logger.warning("⚠️ MISSING CRITICAL FILE: index.html detected. Triggering emergency generation...")
             self.speech.speak("I noticed I missed the HTML file. Generating it now...")
             
             brain = self.app.get('brain')
@@ -840,14 +924,14 @@ OUTPUT FORMAT:
                 if response:
                     new_matches = re.findall(r'<file name="(.*?)">(.*?)</file>', response, re.DOTALL)
                     if new_matches:
-                        print(f"✅ Emergency generation successful. Added {len(new_matches)} files.")
+                        logger.info(f"✅ Emergency generation successful. Added {len(new_matches)} files.")
                         matches.extend(new_matches)
                         return matches
             except Exception as e:
-                print(f"⚠️ Emergency generation failed: {e}")
+                logger.error(f"⚠️ Emergency generation failed: {e}")
                 
             # FALLBACK: If Brain fails/times out, generate a minimal skeleton
-            print("⚠️ Brain unresponsive. Deploying minimal fallback HTML.")
+            logger.error("⚠️ Brain unresponsive. Deploying minimal fallback HTML.")
             fallback_html = """<!DOCTYPE html>
 <html>
 <head>

@@ -23,6 +23,8 @@ class SocketClient: ObservableObject {
     @Published var statusHeader: String = "IDLE"
     @Published var statusDetail: String = "Standing By"
     @Published var isFlashOverlayVisible: Bool = false
+    @Published var isAgenticModeEnabled: Bool = false
+    @Published var isAgenticModeTransitionPending: Bool = false
     
     private var connection: NWConnection?
     private let queue = DispatchQueue(label: "SocketQueue")
@@ -47,14 +49,18 @@ class SocketClient: ObservableObject {
                 case .ready:
                     print("✅ Connected to Jarvis API")
                     self?.isConnected = true
+                    self?.isAgenticModeTransitionPending = false
                     self?.receive()
                 case .failed(let error):
                     print("❌ Connection Failed: \(error)")
                     self?.isConnected = false
+                    self?.isAgenticModeTransitionPending = false
                     // Retry aggressively
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self?.connect() }
                 case .waiting(let error):
                     print("⏳ Waiting... \(error) - Retrying...")
+                    self?.isConnected = false
+                    self?.isAgenticModeTransitionPending = false
                     self?.connection?.cancel()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self?.connect() }
                 default:
@@ -64,6 +70,38 @@ class SocketClient: ObservableObject {
         }
         
         connection?.start(queue: queue)
+    }
+
+    func toggleAgenticMode() {
+        guard isConnected else {
+            print("⚠️ Ignoring agentic toggle while socket is disconnected.")
+            return
+        }
+
+        let newValue = !isAgenticModeEnabled
+        isAgenticModeTransitionPending = true
+        
+        let update: [String: Any] = ["key": "ENABLE_AGENTIC_MODE", "value": newValue]
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: update),
+              let jsonString = String(data: jsonData, encoding: .utf8) else {
+            isAgenticModeTransitionPending = false
+            return
+        }
+        
+        // Use standard send mechanism with prefix trigger
+        let text = "__UPDATE_CONFIG__:\(jsonString)"
+        let json: [String: Any] = ["type": "command", "data": text]
+        guard let data = try? JSONSerialization.data(withJSONObject: json) else { return }
+        let payload = data + "\n".data(using: .utf8)!
+        
+        connection?.send(content: payload, completion: .contentProcessed({ error in
+            if let error = error {
+                DispatchQueue.main.async {
+                    self.isAgenticModeTransitionPending = false
+                }
+                print("Send Error: \(error)")
+            }
+        }))
     }
     
     func send(text: String, webSearch: Bool = false) {
@@ -172,6 +210,7 @@ class SocketClient: ObservableObject {
                     }
                     if let detail = msg.detail, !detail.isEmpty {
                         self.statusDetail = detail
+                        self.syncAgenticModeState(header: msg.header, detail: detail)
                     }
                     
                     let fullMsg = JarvisMessage(type: msg.type, header: msg.header, detail: msg.detail, data: msg.data)
@@ -208,6 +247,19 @@ class SocketClient: ObservableObject {
         }
         NSHapticFeedbackManager.defaultPerformer.perform(pattern, performanceTime: .default)
         #endif
+    }
+
+    private func syncAgenticModeState(header: String?, detail: String) {
+        guard header?.uppercased() == "SYSTEM" else { return }
+
+        let normalizedDetail = detail.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        if normalizedDetail == "AGENTIC MODE: ON" {
+            isAgenticModeEnabled = true
+            isAgenticModeTransitionPending = false
+        } else if normalizedDetail == "AGENTIC MODE: OFF" {
+            isAgenticModeEnabled = false
+            isAgenticModeTransitionPending = false
+        }
     }
 }
 

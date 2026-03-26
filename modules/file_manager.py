@@ -72,6 +72,7 @@ class FileManager:
     
     def create_file(self, filename, content=""):
         """Create a new file with safety checks"""
+        filename = os.path.expanduser(filename)
         try:
             # Safety check
             safe, message = self._is_safe_path(filename)
@@ -92,6 +93,7 @@ class FileManager:
     
     def read_file(self, filename):
         """Read a file"""
+        filename = os.path.expanduser(filename)
         try:
             # Safety check
             safe, message = self._is_safe_path(filename)
@@ -118,6 +120,7 @@ class FileManager:
     
     def delete_file(self, filename, confirmed=False):
         """Delete a file with confirmation"""
+        filename = os.path.expanduser(filename)
         try:
             # Safety check
             safe, message = self._is_safe_path(filename)
@@ -142,6 +145,7 @@ class FileManager:
     
     def list_files(self, directory="."):
         """List files in directory"""
+        directory = os.path.expanduser(directory)
         try:
             # Safety check
             safe, message = self._is_safe_path(directory)

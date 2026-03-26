@@ -336,10 +336,14 @@ class ContactManager:
 
             if message:
                 # Apple Shortcuts requires E.164 format (+CountryCodeNumber)
-                # e.g. +919876543210 — NOT 919876543210 (which looks like plain text)
                 shortcuts_phone = f"+{formatted_phone}" if not formatted_phone.startswith("+") else formatted_phone
-                shortcut_input = f"{shortcuts_phone}|{message}"
-                subprocess.run(["shortcuts", "run", "JarvisWhatsApp", "-i", shortcut_input], check=False)
+                
+                # Escape potential delimiter in the message
+                safe_message = message.replace("|", " ")
+                shortcut_input = f"{shortcuts_phone}|{safe_message}"
+                
+                # Use stdin (input=) instead of -i to support large multiline content (essays)
+                subprocess.run(["shortcuts", "run", "JarvisWhatsApp"], input=shortcut_input, text=True, check=False)
                 return f"Message sent to {resolved_name}."
             else:
                 url = f"whatsapp://send?phone={formatted_phone}"

@@ -37,21 +37,36 @@ class WeatherService:
     def get_weather(self, location_query=""):
         """Get current weather"""
         try:
-            # 1. Get Coordinates
-            # Note: If user asks for specific city ("Weather in London"), we'd need a Geocoding API.
-            # For V1, we stick to "Current Location" (IP) as it's the 99% use case.
-            # If location_query is set, we unfortunately can't do it easily without a key.
-            # So we ignore location_query for now and just give local weather (safe fallback).
+            # 1. Resolve Coordinates
+            lat, lon, city_name, country_name = None, None, None, None
             
-            loc = self._get_location()
-            if not loc:
-                return "I couldn't locate you to check the weather."
+            if location_query:
+                # Use Open-Meteo Geocoding API (Free, No Key)
+                geo_url = "https://geocoding-api.open-meteo.com/v1/search"
+                geo_params = {"name": location_query, "count": 1, "language": "en", "format": "json"}
+                geo_resp = requests.get(geo_url, params=geo_params, timeout=5)
+                
+                if geo_resp.status_code == 200 and geo_resp.json().get('results'):
+                    res = geo_resp.json()['results'][0]
+                    lat = res['latitude']
+                    lon = res['longitude']
+                    city_name = res['name']
+                    country_name = res.get('country', '')
+                else:
+                    print(f"⚠️ Geocoding failed for '{location_query}', falling back to local.")
+            
+            # Fallback to local IP if no query or geocoding failed
+            if lat is None:
+                loc = self._get_location()
+                if not loc:
+                    return {"error": "Couldn't locate you or that city to check the weather."}
+                lat, lon, city_name, country_name = loc['lat'], loc['lon'], loc['city'], loc['country']
             
             # 2. Get Weather from Open-Meteo
             url = "https://api.open-meteo.com/v1/forecast"
             params = {
-                "latitude": loc['lat'],
-                "longitude": loc['lon'],
+                "latitude": lat,
+                "longitude": lon,
                 "current_weather": "true",
                 "temperature_unit": "celsius",
                 "windspeed_unit": "kmh"
@@ -69,7 +84,7 @@ class WeatherService:
                 condition = self._decode_wmo(wmo_code)
                 
                 return f"""
-Weather in {loc['city']}, {loc['country']}:
+Weather in {city_name}, {country_name}:
 • Condition: {condition}
 • Temperature: {temp}°C
 • Wind: {wind} km/h

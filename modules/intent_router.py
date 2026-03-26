@@ -24,7 +24,7 @@ logger = get_logger()
 # ─────────────────────────────────────────────────────────────
 def _hud_msg(text: str):
     """Send a status message to the Jarvis app chatbox + terminal."""
-    print(f"[IntentRouter] {text}")
+    logger.info(f"[IntentRouter] {text}")
     try:
         from core.registry import ServiceRegistry
         hud = ServiceRegistry.get("hud")
@@ -102,22 +102,37 @@ class IntentRouter:
         Returns intent dict or None if ambiguous.
         """
         c = cmd.lower()
-        words = set(c.split())
+        all_words = c.split()
+        unique_words = set(all_words)
+
+        # ── GLOBAL MACRO-COMMAND GUARD ──
+        # If this looks like a prompt, code, or complex instruction, BYPASS all pre-filters.
+        # This prevents technical words (like "lock" or "pause") from triggering system actions.
+        is_macro = (
+            len(all_words) > 12 or 
+            len(cmd) > 120 or 
+            "\n" in cmd or 
+            "{" in cmd or 
+            "---" in cmd
+        )
+        if is_macro:
+            logger.debug("🧠 Macro-command detected — sending to LLM for context analysis")
+            return None
 
         # Very short commands (1–2 words) → conversation, never code architect
-        if len(words) <= 2:
+        if len(unique_words) <= 2:
             return self._ok(self.ACTION_GENERAL_CONVERSATION, 0.9, "Ultra-short, clearly not architect")
 
         # Music/Media
         music_kw = {"play", "pause", "resume", "skip", "next", "previous", "shuffle",
                     "spotify", "music", "song", "track", "album", "artist", "playlist"}
-        if words & music_kw:
+        if unique_words & music_kw:
             return self._ok(self.ACTION_SYSTEM_CONTROL, 0.95, "Music keyword")
 
         # System control
         system_kw = {"volume", "brightness", "battery", "lock", "mute", "unmute",
                      "ram", "cpu", "memory", "disk", "storage", "uptime", "screen"}
-        if words & system_kw:
+        if unique_words & system_kw:
             return self._ok(self.ACTION_SYSTEM_CONTROL, 0.95, "System keyword")
 
         # NLP volume patterns (no "volume" keyword needed)
@@ -130,11 +145,11 @@ class IntentRouter:
 
         # Communication
         comm_kw = {"message", "text", "whatsapp", "email", "mail", "call", "contact", "send"}
-        if words & comm_kw and not ({"build", "create", "make"} & words):
+        if unique_words & comm_kw and not ({"build", "create", "make"} & unique_words):
             return self._ok(self.ACTION_GENERAL_CONVERSATION, 0.9, "Communication keyword")
 
         # Weather
-        if words & {"weather", "forecast", "temperature", "rain", "humidity"}:
+        if (words & {"weather", "forecast", "temperature", "rain", "humidity"}) and not ({"build", "create", "make", "develop"} & words):
             return self._ok(self.ACTION_GENERAL_CONVERSATION, 0.9, "Weather keyword")
 
         # Time / Date
@@ -154,7 +169,7 @@ class IntentRouter:
             return self._ok(self.ACTION_GENERAL_CONVERSATION, 0.9, "Translator keyword")
 
         # News
-        if words & {"news", "headlines", "latest"}:
+        if words & {"news", "headlines"} or (words & {"latest"} and words & {"news", "headlines", "stories", "updates"}):
             return self._ok(self.ACTION_GENERAL_CONVERSATION, 0.9, "News keyword")
 
         # Focus / DND

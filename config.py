@@ -1,4 +1,5 @@
 import os
+from dataclasses import dataclass, field
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -6,6 +7,7 @@ load_dotenv()
 # Assistant Configuration
 ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Jarvis")
 USER_NAME = os.getenv("USER_NAME", "Sir")
+USER_EMAIL = os.getenv("USER_EMAIL", "samson06060@gmail.com")
 
 # API Keys
 PICOVOICE_API_KEY = os.getenv("PICOVOICE_API_KEY")
@@ -49,9 +51,9 @@ CONVERSATION_HISTORY_DAYS = 30  # Auto-delete after X days
 ENCRYPT_STORED_DATA = False  # Future feature
 
 # VAD Settings (Ultra-Fast Response)
-# Reduced to 100ms for instant response (2x faster than before!)
-VAD_SILENCE_DURATION = 0.1  # 100ms (was 600ms)
-VAD_MIN_SPEECH_DURATION = 0.1
+# Resetting to stable values for natural conversation
+VAD_SILENCE_DURATION = 0.6  # 600ms (Stable)
+VAD_MIN_SPEECH_DURATION = 0.3
 
 # Paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -177,6 +179,38 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_MAX_TOKENS = 32000
 
 # ============== GEMINI CONFIG (Optional) ==============
-# GEMINI_API_KEY = ""
-# GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = "gemini-2.0-flash"
 DEV_MODE = False
+
+# ============== AGENTIC LLM (MASTER CONTROL) ==============
+# Set MASTER_AGENTIC_KEY in your .env file for security. 
+# JARVIS will auto-detect the provider (Groq, Gemini, or OpenRouter).
+MASTER_AGENTIC_KEY = os.getenv("MASTER_AGENTIC_KEY", "")
+AUTO_DETECT_AGENTIC_PROVIDER = True
+
+# Choose your provider manually ONLY if auto-detect is False: "groq", "openrouter", "gemini", "ollama"
+AGENTIC_LLM_PROVIDER = os.getenv("AGENTIC_LLM_PROVIDER", "groq")
+
+# Choose your model for the agentic loop
+# Default: llama-3.3-70b-versatile (Groq), gemini-2.0-flash (Gemini), stepfun/step-3.5-flash:free (OpenRouter)
+AGENTIC_LLM_MODEL = os.getenv("AGENTIC_LLM_MODEL", "llama-3.3-70b-versatile")
+
+# ============== AGENTIC MODE (Modular/Toggleable) ==============
+ENABLE_AGENTIC_MODE = True
+AGENTIC_MAX_ITERATIONS = 30  # Max steps in a single ReAct loop
+AGENTIC_TIMEOUT_SECONDS = 30 # Bounds: 5-120
+TOOL_CALL_MAX_RETRIES = 2    # Bounds: 0-5
+
+@dataclass
+class AgentConfig:
+    enabled: bool = field(default=False)
+    max_iterations: int = field(default=6)
+    timeout: int = field(default=30)
+    retry_budget: int = field(default=2)
+
+    def validate(self):
+        """Strict bounds validation as per implementation plan"""
+        self.max_iterations = max(1, min(50, self.max_iterations))
+        self.timeout = max(5, min(120, self.timeout))
+        self.retry_budget = max(0, min(5, self.retry_budget))

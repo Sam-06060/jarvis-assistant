@@ -44,7 +44,9 @@ class MusicController:
         if "spotify" in app_name:
             try:
                 subprocess.run(["open", "-a", "Spotify"])
-                time.sleep(1) # Wait for launch
+                # Stability Delay: Normal JARVIS speaks while this loads. 
+                # Chained agentic commands are silent, so we must wait explicitly.
+                time.sleep(1.8) 
                 
                 # Dynamic Search & Auto-Play via AppleScript Native Play
                 # Construct specific query. If " by " in song, make it stricter
@@ -58,7 +60,7 @@ class MusicController:
                 # Open Search Page (Using 'open' prevents Spotify from auto-playing a radio mix before the keystrokes hit)
                 subprocess.run(["open", search_uri])
                 
-                time.sleep(1.5) # Wait for UI to load
+                time.sleep(2.0) # Wait for UI to load (Longer for broad-to-song resolution)
                 
                 # Force Play using the user's explicit UI Scripting flow
                 try:
@@ -66,16 +68,17 @@ class MusicController:
                     tell application "System Events"
                         tell process "Spotify"
                             set frontmost to true
-                            delay 0.2
+                            delay 0.5
                             key code 48 -- Tab (Exit Search Bar focus)
-                            delay 0.2
-                            keystroke "a" using command down -- Select All
-                            delay 0.2
+                            delay 0.3
                             key code 36 -- Enter (Navigate into Top Result)
-                            delay 0.8 -- Wait 0.5-1s
+                            delay 0.8
                             key code 36 -- Enter (Confirm Playback)
+                            delay 0.2
+                            key code 36 -- Enter (Final Play Kickstart)
                         end tell
                     end tell
+                    tell application "Spotify" to play
                     '''
                     subprocess.run(["osascript", "-e", script_ui], check=True)
                     return f"Playing {song} on Spotify."

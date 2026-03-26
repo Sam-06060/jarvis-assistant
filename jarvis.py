@@ -6,6 +6,7 @@ import os
 import io
 import signal
 import queue
+import json
 import atexit
 
 # --- 1. SETUP LOGGING (Critical First Step) ---
@@ -78,6 +79,8 @@ class JarvisApp:
         # Phase 2: Register Core Config/Status
         ServiceRegistry.register("hud", hud_queue)
         ServiceRegistry.register("app", self)
+        
+        self.agent = None
         
     def initialize_systems(self):
         """Initialize all subsystems with error handling"""
@@ -153,6 +156,9 @@ class JarvisApp:
             ServiceRegistry.register("commander", commander)
 
             logger.info("✅ Command Processor Initialized")
+
+            # Agentic mode is now OFF by default on startup.
+            # Use 'agentic mode on' to activate during a session.
 
         except Exception as e:
             logger.critical(f"❌ FATAL INITIALIZATION ERROR: {e}", exc_info=True)
@@ -251,6 +257,10 @@ class JarvisApp:
         if speech:
             speech.play_wake_sound()
             speech.speak("All systems online.")
+        
+        # 🟢 PROACTIVE SYNC: Broadcast actual agent state to ensure UI is in sync at boot
+        status = "ON" if self.agent is not None else "OFF"
+        self._update_hud("SYSTEM", f"Agentic Mode: {status}")
         self._update_hud("IDLE", "Online")
 
         # 7. EVENT LOOP
@@ -403,6 +413,7 @@ class JarvisApp:
         Returns: (cleaned_command, web_search_bool)
         """
         web_search = False
+        found_explicit = False
         
         # Handle Dict Input (from Socket)
         if isinstance(command, dict):
@@ -412,10 +423,11 @@ class JarvisApp:
         # Prepare for Trigger Check
         cmd_lower = command.lower()
         
-        # 1. Explicit Triggers
-        # Keep the original command text intact for downstream regex/NLP routing.
-        # Only strip the helper prefix "use search" if it appears at the start.
-        found_explicit = False
+        # 1. Strip helper prefix but PRESERVE internal and significant whitespace
+        # We only strip leading/trailing if it's a single line.
+        # For multi-line, we treat it as code/pre-formatted text.
+        is_multiline = "\n" in command
+        
         explicit_patterns = [
             r"\bgoogle\b",
             r"\bsearch\b",
@@ -427,12 +439,21 @@ class JarvisApp:
             web_search = True
             found_explicit = True
 
-        command = re.sub(r"^\s*use search(?:\s+(?:for|on))?\s+", "", command, flags=re.IGNORECASE).strip() or command
-        
+        # Only strip prefix if it's there
+        prefix_pattern = r"^\s*use search(?:\s+(?:for|on))?\s+"
+        if re.search(prefix_pattern, command, flags=re.IGNORECASE):
+            command = re.sub(prefix_pattern, "", command, flags=re.IGNORECASE)
+            
+        if not is_multiline:
+            command = command.strip()
         
         # 2. AI-Powered Smart Detection (Fast <500ms)
         if not web_search and not found_explicit:
-            web_search = self._ai_needs_web_search(command)
+            # Short-circuit: large pastes are likely code/notes, not factual searches
+            if len(command) > 300 or is_multiline:
+                web_search = False
+            else:
+                web_search = self._ai_needs_web_search(command)
                     
         return command, web_search
     
@@ -534,35 +555,34 @@ class JarvisApp:
 
     def _handle_text_command(self, command_data, commander, brain):
         """Process text input path"""
-        # PHASE 13.3: Handle Pydantic Dict or Legacy String
+        # 1. Handle Pydantic Dict or Legacy String
         if isinstance(command_data, dict):
             command = command_data.get("text", "")
             explicit_web_search = command_data.get("web_search", False)
             source = command_data.get("source", "unknown")
-            logger.info(f"⌨️ Typed Command ({source}): {command} [Web: {explicit_web_search}]")
         else:
-            # Legacy String Fallback
             command = str(command_data)
             explicit_web_search = False
             source = "legacy"
-            logger.info(f"⌨️ Legacy Command: {command}")
 
-        # ALWAYS run AI classifier for smart web search detection
-        # The explicit toggle from UI acts as a force-override
+        # 2. INTERCEPT INTERNAL COMMANDS FIRST (Silent/No HUD)
+        if command.startswith("__UPDATE_CONFIG__"):
+            self._process_internal_config_update(command)
+            return
+
+        # 3. Normal Command Processing
+        logger.info(f"⌨️ Typed Command ({source}): {command} [Web: {explicit_web_search}]")
+        
+        # Parse for smart web search
         command, ai_web_search = self._parse_web_search_command(command)
         web_search = explicit_web_search or ai_web_search
 
         self._update_hud("USER", f"⌨️ {command}")
         self._update_hud("PROCESSING", "Analyzing Text...")
         
-        if web_search:
-             self._update_hud("PROCESSING", "🌍 Web Search Active")
-             print(f"🌍 Web Search Query: '{command}'")
+# self._update_hud("PROCESSING", "🌍 Web Search Active")
+# print(f"🌍 Web Search Query: '{command}'")
         
-        # Special Internal Commands
-        if command.startswith("__UPDATE_CONFIG__"):
-            return
-
         speech = ServiceRegistry.get("speech")
         result = self._run_command_with_interrupt_guard(
             commander=commander,
@@ -591,6 +611,32 @@ class JarvisApp:
             return False
 
         elif result == "USE_AI_BRAIN":
+            # PHASE 1 UPDATED: Route to Agent if active
+            if getattr(config, "ENABLE_AGENTIC_MODE", False) and self.agent:
+                speech.speak("Entering agentic loop.")
+                self._update_hud("AGENT", f"Task: {command_text}")
+                
+                # Run Agent in thread to allow interruptions (same as Brain)
+                agent_res_container = {"text": None}
+                def run_agent_encapsulated():
+                    if not speech.is_interrupted:
+                        agent_res_container["text"] = self.agent.run(command_text)
+                
+                agent_thread = threading.Thread(target=run_agent_encapsulated)
+                agent_thread.start()
+                
+                while agent_thread.is_alive():
+                    if self._detect_interrupt(speech):
+                        self._cancel_current_cycle(speech, reason="Agent Cancelled")
+                        return False
+                    time.sleep(0.05)
+                
+                response = agent_res_container["text"]
+                if response:
+                    log_history(ServiceRegistry.get("history"), command_text, response, "autonomous_agent")
+                    speech.speak(response, allow_interruptions=True)
+                return True
+
             speech.speak("Thinking.")
             self._update_hud("PROCESSING", "Thinking...")
             
@@ -816,6 +862,101 @@ class JarvisApp:
         except Exception as e:
             logger.error(f"❌ Failed to restart {service_name}: {e}")
             return False
+
+    def _process_internal_config_update(self, raw_command: str):
+        """
+        Handles __UPDATE_CONFIG__:{"key": "ENABLE_AGENTIC_MODE", "value": true}
+        Persists to config.py atomically and triggers live logic shifts.
+        """
+        try:
+            json_str = raw_command.replace("__UPDATE_CONFIG__:", "").strip()
+            data = json.loads(json_str)
+            key = data.get("key")
+            value = data.get("value")
+
+            if key == "ENABLE_AGENTIC_MODE":
+                # Keep the live runtime config in sync with the persisted flag.
+                setattr(config, key, value)
+                self._toggle_agent(value)
+                # Still persist to file
+                self._update_atomic_config("ENABLE_AGENTIC_MODE", value)
+
+        except Exception as e:
+            logger.error(f"❌ Config Update Error: {e}")
+
+    def _toggle_agent(self, enabled: bool, silent: bool = False):
+        """Unified logic to activate/deactivate Agentic Mode"""
+        # NO EARLY EXIT: We always proceed to broadcast state to force-sync the UI
+        old_agent = self.agent
+        
+        if enabled:
+            if old_agent is None:
+                logger.info("🤖 AGENTIC MODE ACTIVATED")
+                try:
+                    from modules.agent_core import AgentCore
+                    agent_cfg = config.AgentConfig(
+                        enabled=True,
+                        max_iterations=getattr(config, "AGENTIC_MAX_ITERATIONS", 30),
+                        timeout=getattr(config, "AGENTIC_TIMEOUT_SECONDS", 30),
+                        retry_budget=getattr(config, "TOOL_CALL_MAX_RETRIES", 2)
+                    )
+                    agent_cfg.validate()
+                    
+                    self.agent = AgentCore(registry=ServiceRegistry, config=agent_cfg)
+                    if not silent:
+                        speech = ServiceRegistry.get("speech")
+                        if speech:
+                            speech.speak("Switched to agentic mode, sir")
+                except Exception as e:
+                    logger.error(f"❌ Failed to initialize Agentic Mode: {e}")
+                    self._update_hud("ERROR", f"Agent Init Failed: {str(e)}")
+            
+            # FORCE BROADCAST to sync UI
+            self._update_hud("SYSTEM", "Agentic Mode: ON")
+        else:
+            if old_agent is not None:
+                logger.info("🔌 AGENTIC MODE DEACTIVATED")
+                self.agent = None
+                if not silent:
+                    speech = ServiceRegistry.get("speech")
+                    if speech:
+                        speech.speak("Switching back to standard mode")
+            
+            # FORCE BROADCAST to sync UI
+            self._update_hud("SYSTEM", "Agentic Mode: OFF")
+        
+        # Always end in IDLE state for HUD to clear visual cues
+        self._update_hud("IDLE", "Standing By")
+
+    def _update_atomic_config(self, key: str, value):
+        """Persists config change to config.py using atomic rename pattern"""
+        config_path = os.path.join(os.path.dirname(__file__), "config.py")
+        tmp_path = config_path + ".tmp"
+        
+        try:
+            with open(config_path, 'r') as f:
+                lines = f.readlines()
+            
+            with open(tmp_path, 'w') as f:
+                key_found = False
+                for line in lines:
+                    if line.strip().startswith(f"{key} ="):
+                        val_str = f"'{value}'" if isinstance(value, str) else str(value)
+                        f.write(f"{key} = {val_str}\n")
+                        key_found = True
+                    else:
+                        f.write(line)
+                
+                if not key_found:
+                    val_str = f"'{value}'" if isinstance(value, str) else str(value)
+                    f.write(f"\n{key} = {val_str}\n")
+            
+            os.replace(tmp_path, config_path)
+            logger.debug(f"💾 Persisted {key}={value} to config.py")
+        except Exception as e:
+            logger.error(f"❌ Atomic config write failed: {e}")
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
     def stop(self):
         """Cleanup and Shutdown"""

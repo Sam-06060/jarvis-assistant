@@ -267,10 +267,24 @@ class SystemSkill(Skill):
         return False
 
     def _lock_screen(self):
-        """Lock the Mac screen using pmset (puts display to sleep)."""
+        """Lock the Mac screen using Cmd+Ctrl+Q keyboard shortcut simulation."""
         try:
             self.speech.speak("Locking screen.")
-            subprocess.run(["pmset", "displaysleepnow"], check=False)
+            
+            # 1. Use AppleScript to simulate Cmd+Ctrl+Q
+            # This is the most reliable method requested by the user.
+            cmd_ctrl_q = 'tell application "System Events" to keystroke "q" using {command down, control down}'
+            subprocess.run(["osascript", "-e", cmd_ctrl_q], check=False)
+            
+            # 2. Fallback: SACLockScreen (low-level API)
+            import ctypes
+            login_framework = "/System/Library/PrivateFrameworks/login.framework/Versions/A/login"
+            try:
+                lib = ctypes.CDLL(login_framework)
+                lib.SACLockScreen()
+            except Exception:
+                pass
+                
             return True
         except Exception as e:
             self.speech.speak("I couldn't lock the screen.")

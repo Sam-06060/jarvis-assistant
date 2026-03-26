@@ -73,9 +73,15 @@ class MusicSkill(Skill):
                 # Check if it's a specific song request (more than just "play" or "play music")
                 clean_cmd = cmd.replace("play", "").strip()
                 if clean_cmd and clean_cmd not in ["music", "some music", "spotify", "songs"]:
-                    # Assume Spotify for specific songs (User preference)
-                    self.speech.speak(f"Searching Spotify for {clean_cmd}...")
-                    music_controller.play_on_specific_app(clean_cmd, "Spotify")
+                    # Assumption: Specific query resolving broad terms (mood/genre) to songs to avoid playlists
+                    song_request = self._resolve_broad_query(clean_cmd)
+                    
+                    if song_request != clean_cmd:
+                        self.speech.speak(f"Picking a track for your {clean_cmd} request: {song_request}...")
+                    else:
+                        self.speech.speak(f"Searching Spotify for {clean_cmd}...")
+                        
+                    music_controller.play_on_specific_app(song_request, "Spotify")
                 else:
                     # Just Resume
                     self.speech.speak(music_controller.play())
@@ -89,6 +95,43 @@ class MusicSkill(Skill):
             return True
             
         return False
+
+    def _resolve_broad_query(self, query):
+        """
+        Detects broad terms (genres, moods) and resolves them to a specific song 
+        to avoid Spotify Playlist landing pages which break automation.
+        """
+        # 1. Broad Detection Heuristics
+        broad_terms = [
+            "music", "jazz", "lofi", "study", "relax", "upbeat", "sad", "happy", 
+            "workout", "chill", "classical", "pop", "rock", "metal", "blues", "focus"
+        ]
+        
+        is_broad = any(term == query.lower() for term in broad_terms) or \
+                   len(query.split()) < 3 and not any(x in query.lower() for x in ["by", "artist", "track"])
+        
+        if not is_broad:
+            return query
+            
+        # 2. Resolve via Brain
+        brain = self.app.get('brain')
+        if not brain:
+            return query
+            
+        try:
+            # Stage 10: Specificity prompt
+            prompt = f"The user wants to hear '{query}'. To ensure it plays on Spotify without hitting a playlist page, give me a single specific popular song title and artist that fits this mood or genre. Return ONLY the format: 'Song Title by Artist Name'."
+            resolved = brain.ask(prompt)
+            
+            # Clean up response (some models add fluff)
+            resolved = resolved.replace('"', '').replace("'", "").strip()
+            if "by" in resolved.lower() and len(resolved) < 60:
+                print(f"🎵 Resolved broad query '{query}' to specific track: '{resolved}'")
+                return resolved
+        except:
+            pass
+            
+        return query
 
     def _handle_youtube(self, cmd):
         system = self.app.get('system')

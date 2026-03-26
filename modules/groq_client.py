@@ -11,6 +11,7 @@ import logging
 import time
 import os
 import config
+from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -47,21 +48,45 @@ class GroqClient:
         self.session.headers.update({"Content-Type": "application/json"})
         
         # Groq (Fallback + Intent Routing)
-        self.groq_api_key = os.getenv("GROQ_API_KEY", config.GROQ_API_KEY)
-        self.groq_model = config.GROQ_MODEL
-        self.groq_url = config.GROQ_URL
-        self.groq_max_tokens = config.GROQ_MAX_TOKENS
-        self.groq_available = bool(self.groq_api_key)
+        self.groq_api_key = os.getenv("GROQ_API_KEY", "") or getattr(config, "GROQ_API_KEY", "")
+        self.groq_model = getattr(config, "GROQ_MODEL", "llama-3.3-70b-versatile")
+        self.groq_url = getattr(config, "GROQ_URL", "https://api.groq.com/openai/v1/chat/completions")
+        self.groq_max_tokens = getattr(config, "GROQ_MAX_TOKENS", 8192)
         
         # OpenRouter (Primary Code Generation)
-        self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY", getattr(config, "OPENROUTER_API_KEY", ""))
+        self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "") or getattr(config, "OPENROUTER_API_KEY", "")
         self.openrouter_model = getattr(config, "OPENROUTER_MODEL", "stepfun/step-3.5-flash:free")
         self.openrouter_url = getattr(config, "OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
         self.openrouter_max_tokens = getattr(config, "OPENROUTER_MAX_TOKENS", 32000)
-        self.openrouter_available = bool(self.openrouter_api_key)
         
+        # Gemini (Optional)
+        self.gemini_api_key = os.getenv("GEMINI_API_KEY", "") or getattr(config, "GEMINI_API_KEY", "")
+        self.gemini_model = getattr(config, "GEMINI_MODEL", "gemini-2.0-flash")
+
+        # 🚀 MASTER AUTO-DETECT (Phase 8) - Priority over individual keys
+        self.master_key = os.getenv("MASTER_AGENTIC_KEY", "") or getattr(config, "MASTER_AGENTIC_KEY", "")
+        
+        if self.master_key and getattr(config, "AUTO_DETECT_AGENTIC_PROVIDER", True):
+            detected = self._detect_provider(self.master_key)
+            if detected:
+                logger.info(f"🪄 Magic Key Detected! Switching Agentic Provider to: {detected.upper()}")
+                # Sync global provider and model
+                config.AGENTIC_LLM_PROVIDER = detected
+                if detected == "openrouter":
+                    config.AGENTIC_LLM_MODEL = self.openrouter_model
+                elif detected == "gemini":
+                    config.AGENTIC_LLM_MODEL = self.gemini_model
+                elif detected == "groq":
+                    config.AGENTIC_LLM_MODEL = self.groq_model
+
+        # Final Availability Check - CRITICAL for reliability
+        self.groq_available = bool(self.groq_api_key)
+        self.openrouter_available = bool(self.openrouter_api_key)
+        self.gemini_available = bool(self.gemini_api_key)
+
         # Debug Print
-        print(f"DEBUG: GroqClient Init - OpenRouter Key Present: {bool(self.openrouter_api_key)}")
+        print(f"DEBUG: GroqClient Init - Detected Provider: {getattr(config, 'AGENTIC_LLM_PROVIDER', 'None')}")
+        print(f"DEBUG: OpenRouter Key Present: {self.openrouter_available}")
         if self.openrouter_api_key:
             print(f"DEBUG: Key starts with: {self.openrouter_api_key[:10]}...")
             
@@ -70,10 +95,12 @@ class GroqClient:
         self.model = self.groq_model
         self.url = self.groq_url
         self.max_tokens = self.groq_max_tokens
-        self.available = self.groq_available or self.openrouter_available
+        self.available = self.groq_available or self.openrouter_available or self.gemini_available
         
         if self.openrouter_available:
             logger.info(f"🌐 OpenRouter Ready (Model: {self.openrouter_model})")
+        if self.gemini_available:
+            logger.info(f"✨ Gemini Ready (Model: {self.gemini_model})")
         if self.groq_available:
             logger.info(f"☁️ Groq Ready (Model: {self.groq_model}) [Fallback]")
             # Warmup: pre-establish TCP+TLS connection in background
@@ -166,11 +193,33 @@ class GroqClient:
             
         return None
 
+    def ask(self, prompt, system_prompt=None, provider=None, model=None):
+        """
+        MASTER ENTRY POINT: Dispatches to the configured provider.
+        Used by Brain and AgentCore.
+        """
+        # If no provider specified, use the global master toggle
+        provider = provider or getattr(config, "AGENTIC_LLM_PROVIDER", "ollama")
+        target_model = model or getattr(config, "AGENTIC_LLM_MODEL", None)
+        
+        if provider == "groq":
+            return self._call_groq(prompt, system_prompt, target_model)
+        elif provider == "openrouter":
+            return self._call_openrouter(prompt, system_prompt, target_model)
+        elif provider == "gemini":
+            return self._call_gemini(prompt, system_prompt, target_model)
+        elif provider == "ollama":
+            # Call brain's local ollama fallback logic if called from outside brain
+            return None # Brain handles Ollama directly
+        
+        return None
+
     # ============================================================
     # OpenRouter (StepFun 3.5 Flash) - ROBUST CLIENT
     # ============================================================
-    def _call_openrouter(self, prompt, system_prompt=None):
+    def _call_openrouter(self, prompt, system_prompt=None, model=None):
         """Call OpenRouter API with streaming for real-time progress updates."""
+        target_model = model if model else self.openrouter_model
         
         messages = []
         if system_prompt:
@@ -185,7 +234,7 @@ class GroqClient:
         }
         
         payload = {
-            "model": self.openrouter_model,
+            "model": target_model,
             "messages": messages,
             "max_tokens": self.openrouter_max_tokens,
             "temperature": 0.3,
@@ -201,7 +250,7 @@ class GroqClient:
         
         for attempt in range(max_retries):
             try:
-                logger.info(f"🌐 Sending to OpenRouter ({self.openrouter_model}) [Attempt {attempt+1}/{max_retries}]...")
+                logger.info(f"🌐 [OpenRouter] Requesting {target_model} [Attempt {attempt+1}/{max_retries}]...")
                 
                 start_time = time.time()
                 response = self.session.post(
@@ -241,7 +290,7 @@ class GroqClient:
                                     current_time = time.time()
                                     if current_time - last_log_time > 2.0:
                                         percentage = min(99, int((char_count / ESTIMATED_TOTAL_CHARS) * 100))
-                                        logger.info(f"🚀 Generating... {percentage}% ({char_count} chars)")
+                                        logger.info(f"🚀 [OpenRouter] Progress: {percentage}% ({char_count} chars)")
                                         last_log_time = current_time
                                         
                             except json.JSONDecodeError:
@@ -249,30 +298,25 @@ class GroqClient:
                                 
                     final_content = "".join(full_content)
                     duration = time.time() - start_time
-                    logger.info(f"✅ OpenRouter Complete: {len(final_content)} chars in {duration:.1f}s")
+                    logger.info(f"✅ [OpenRouter] Success: {len(final_content)} chars in {duration:.1f}s")
                     
                     # Clean up
                     final_content = re.sub(r'<think>.*?</think>', '', final_content, flags=re.DOTALL).strip()
                     return final_content
                 
-                elif response.status_code == 429:
-                    wait_time = backoff_base * (attempt + 1)
-                    logger.warning(f"⚠️ Rate Limited (429). Retrying in {wait_time}s...")
-                    time.sleep(wait_time)
-                    continue
-                
-                elif response.status_code >= 500:
-                    logger.warning(f"⚠️ Server Error ({response.status_code}). Retrying...")
-                    time.sleep(2)
-                    continue
-                
-                elif response.status_code == 401:
-                    logger.error("❌ OpenRouter API key invalid.")
-                    return None
-                
                 else:
-                    logger.error(f"❌ OpenRouter error {response.status_code}: {response.text[:300]}")
-                    return None
+                    logger.error(f"❌ [OpenRouter] API Error {response.status_code}: {response.text[:500]}")
+                    if response.status_code == 429:
+                        wait_time = backoff_base * (attempt + 1)
+                        logger.warning(f"⚠️ [OpenRouter] Rate Limited. Retrying in {wait_time}s...")
+                        time.sleep(wait_time)
+                        continue
+                    elif response.status_code >= 500:
+                        logger.warning(f"⚠️ [OpenRouter] Server Error. Retrying in 2s...")
+                        time.sleep(2)
+                        continue
+                    else:
+                        return None
                     
             except requests.exceptions.Timeout:
                 logger.warning("⚠️ Connect Timeout. Retrying...")
@@ -324,34 +368,30 @@ class GroqClient:
         for attempt in range(1, max_retries + 1):
             timeout = base_timeout * attempt  # 15s, 30s, 45s
             try:
-                logger.info(f"☁️ Groq ({target_model}) — Attempt {attempt}/{max_retries} (timeout {timeout}s)...")
+                logger.info(f"☁️ [Groq] Requesting {target_model} — Attempt {attempt}/{max_retries} (timeout {timeout}s)...")
                 response = self.session.post(self.groq_url, headers=headers, json=payload, timeout=timeout)
                 
                 if response.status_code == 200:
                     data = response.json()
                     content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
                     self._last_success_time = time.time()  # Track success
-                    logger.info(f"✅ Groq Response: {len(content)} chars (attempt {attempt})")
+                    logger.info(f"✅ [Groq] Success: {len(content)} chars (attempt {attempt})")
                     return content
                 
-                elif response.status_code == 429:
-                    # Rate limited — respect Retry-After header if present
-                    retry_after = int(response.headers.get("Retry-After", 2 * attempt))
-                    logger.warning(f"⚠️ Groq Rate Limited (429). Waiting {retry_after}s before retry...")
-                    time.sleep(retry_after)
-                    continue
-                
-                elif response.status_code >= 500:
-                    # Server error — retry after backoff
-                    wait = 2 * attempt
-                    logger.warning(f"⚠️ Groq Server Error ({response.status_code}). Retrying in {wait}s...")
-                    time.sleep(wait)
-                    continue
-                
                 else:
-                    # Client error (401, 400, etc.) — don't retry
-                    logger.error(f"❌ Groq Error {response.status_code}: {response.text[:200]}")
-                    return None
+                    logger.error(f"❌ [Groq] API Error {response.status_code}: {response.text[:500]}")
+                    if response.status_code == 429:
+                        retry_after = int(response.headers.get("Retry-After", 2 * attempt))
+                        logger.warning(f"⚠️ [Groq] Rate Limited. Waiting {retry_after}s...")
+                        time.sleep(retry_after)
+                        continue
+                    elif response.status_code >= 500:
+                        wait = 2 * attempt
+                        logger.warning(f"⚠️ [Groq] Server Error. Retrying in {wait}s...")
+                        time.sleep(wait)
+                        continue
+                    else:
+                        return None
                     
             except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
                 error_type = "Timeout" if isinstance(e, requests.exceptions.Timeout) else "Connection Error"
@@ -368,5 +408,65 @@ class GroqClient:
                 return None
         
         logger.error(f"❌ Groq: All {max_retries} attempts failed.")
+        return None
+
+    def _call_gemini(self, prompt, system_prompt=None, model=None):
+        """Call Google Gemini API."""
+        if not self.gemini_available: return None
+        
+        target_model = model if model else self.gemini_model
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={self.gemini_api_key}"
+        
+        headers = {"Content-Type": "application/json"}
+        
+        # Build contents
+        contents = []
+        if system_prompt:
+            contents.append({"role": "user", "parts": [{"text": f"SYSTEM INSTRUCTION: {system_prompt}"}]})
+            contents.append({"role": "model", "parts": [{"text": "Understood. I will follow those instructions."}]})
+        
+        contents.append({"role": "user", "parts": [{"text": prompt}]})
+        
+        payload = {
+            "contents": contents,
+            "generationConfig": {
+                "temperature": 0.3,
+                "maxOutputTokens": 8192,
+            }
+        }
+        
+        try:
+            logger.info(f"✨ [Gemini] Requesting {target_model}...")
+            response = self.session.post(url, headers=headers, json=payload, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                # Parse Gemini response structure
+                content = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                logger.info(f"✅ [Gemini] Success: {len(content)} chars")
+                return content
+            else:
+                logger.error(f"❌ [Gemini] API Error {response.status_code}: {response.text[:500]}")
+                return None
+        except Exception as e:
+            logger.error(f"❌ [Gemini] Unexpected Error: {e}")
+            return None
+
+    def _detect_provider(self, api_key: str) -> Optional[str]:
+        """Auto-identifies API provider based on key format."""
+        if not api_key: return None
+        
+        # Groq usually starts with gsk_
+        if api_key.startswith("gsk_"):
+            return "groq"
+        
+        # OpenRouter usually starts with sk-or-v1- or sk-
+        if api_key.startswith("sk-or-v1-") or (api_key.startswith("sk-") and len(api_key) > 40):
+            return "openrouter"
+            
+        # Gemini usually starts with AIzaSy
+        if api_key.startswith("AIza"):
+            return "gemini"
+            
         return None
 

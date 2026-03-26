@@ -47,6 +47,17 @@ class JarvisSocketServer:
                     self.clients.append(client_sock)
                 # handle client in a separate thread
                 threading.Thread(target=self._handle_client, args=(client_sock,), daemon=True).start()
+
+                # 🚀 PROACTIVE SYNC: Broadcast current agent state to NEW client
+                try:
+                    import config
+                    status = "ON" if getattr(config, "ENABLE_AGENTIC_MODE", False) else "OFF"
+                    # We use a short delay to ensure the client is ready to receive
+                    def sync_broadcast():
+                        time.sleep(0.5)
+                        self.broadcast("SYSTEM", f"Agentic Mode: {status}")
+                    threading.Thread(target=sync_broadcast, daemon=True).start()
+                except: pass
             except Exception as e:
                 if self.running:
                     print(f"Socket Accept Error: {e}")
@@ -56,44 +67,43 @@ class JarvisSocketServer:
         from utils.logger import get_logger
         logger = get_logger()
         buffer = ""
+        decoder = json.JSONDecoder()
         try:
             while self.running:
-                data = client_sock.recv(4096)
+                # Increased buffer to handle large pastes (16KB chunks)
+                data = client_sock.recv(16384)
                 if not data:
                     break
                 
                 buffer += data.decode('utf-8')
                 
-                # Split by newline (assuming JSON-lines or newline delimited headers)
-                while "\n" in buffer:
-                    line, buffer = buffer.split("\n", 1)
-                    line = line.strip()
-                    if not line: continue
-                    
+                # Use raw_decode to extract JSON objects sequentially.
+                # This ensures internal newlines in command data don't break the parser.
+                while buffer.strip():
                     try:
-                        message = json.loads(line)
-                        # Expected format: {"type": "command", "data": "hello"}
+                        # Attempt to decode a JSON object from the start of the buffer
+                        message, index = decoder.raw_decode(buffer.lstrip())
+                        # Successfully decoded an object, remove it from buffer
+                        buffer = buffer.lstrip()[index:].lstrip()
+                        
                         if message.get("type") == "command" and self.input_queue:
-                            # Extract data and web_search flag
                             data = message.get("data", "")
                             web_search = message.get("web_search", False)
                             
-                            # --- NATIVE SPEECH FILTER ---
                             current_time = time.time()
                             
-                            # 1. Block Partial Results
+                            # 1. Block Partial Results (Native Speech)
                             if data.startswith("__PARTIAL__"):
                                 self.last_partial_time = current_time
                                 continue
                                 
                             # 2. Block Final Native Speech (Heuristic)
                             if hasattr(self, 'last_partial_time') and (current_time - self.last_partial_time < 1.0):
-                                logger.debug(f"🔇 Ignoring Native Speech Final: '{data}'")
+                                logger.debug(f"🔇 Ignoring Native Speech Final: '{data[:50]}...'")
                                 self.last_partial_time = 0 
                                 continue
-                            # ----------------------------
 
-                            logger.info(f"📥 Received CMD: {data} [Web: {web_search}]")
+                            logger.info(f"📥 Received CMD: {data[:100]}... [Web: {web_search}]")
                             
                             # PHASE 13.3: TYPE SAFETY
                             from core.schemas import JarvisCommand
@@ -103,7 +113,7 @@ class JarvisSocketServer:
                                     web_search=web_search,
                                     source="socket_api"
                                 )
-                                # Queue the validated object (or dict for backward compat)
+                                # Queue the validated object
                                 self.input_queue.put(command_obj.dict())
                             except Exception as e:
                                 logger.error(f"❌ Invalid Command Data: {e}")
@@ -112,8 +122,10 @@ class JarvisSocketServer:
                         elif message.get("type") == "config":
                             if self.input_queue:
                                 self.input_queue.put(f"__UPDATE_CONFIG__ {json.dumps(message.get('data'))}")
+                                
                     except json.JSONDecodeError:
-                        logger.warning(f"⚠️ Invalid JSON: {line}")
+                        # Not enough data yet to form a full JSON object, wait for more packets
+                        break
                         
         except Exception as e:
             logger.error(f"❌ Socket Client Error: {e}")
@@ -128,28 +140,29 @@ class JarvisSocketServer:
         msg_type = "hud_update"
         data_field = None
         
-        # New: Handle Partial Transcripts for Live Captions
-        if header == "PARTIAL":
-            msg_type = "partial"
-            data_field = detail # Send text as 'data'
-        
-        message = json.dumps({
-            "type": msg_type,
-            "header": header,
-            "detail": detail,
-            "data": data_field
-        }) + "\n"
-        
-        with self.lock:
-            for client in self.clients[:]:
-                try:
-                    client.sendall(message.encode('utf-8'))
-                except:
-                    self.clients.remove(client)
+        # Check standard broadcast format
+        try:
+            msg = json.dumps({
+                "type": msg_type,
+                "header": str(header),
+                "detail": str(detail)
+            }) + "\n"
+            
+            with self.lock:
+                disconnected = []
+                for client in self.clients:
+                    try:
+                        client.sendall(msg.encode('utf-8'))
+                    except:
+                        disconnected.append(client)
+                
+                for disc in disconnected:
+                    if disc in self.clients:
+                        self.clients.remove(disc)
+        except Exception as e:
+            print(f"Broadcast Error: {e}")
 
     def stop(self):
         self.running = False
         if self.server_socket:
-            try:
-                self.server_socket.close()
-            except: pass
+            self.server_socket.close()

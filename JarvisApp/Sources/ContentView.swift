@@ -1244,6 +1244,7 @@ private struct SyntaxHighlightText: View {
 }
 
 private struct ChatInputBar: View {
+    @EnvironmentObject var socketClient: SocketClient
     let placeholder: String
     @Binding var inputText: String
     @Binding var isWebSearchEnabled: Bool
@@ -1266,10 +1267,21 @@ private struct ChatInputBar: View {
             Button(action: { isWebSearchEnabled.toggle() }) {
                 Image(systemName: isWebSearchEnabled ? "globe" : "mic")
                     .font(.system(size: 16, weight: .medium))
-                    .foregroundColor(.white.opacity(0.85))
+                    .foregroundColor(isWebSearchEnabled ? .cyan : .white.opacity(0.85))
                     .frame(width: 30, height: 30)
             }
             .buttonStyle(.plain)
+
+            Button(action: { socketClient.toggleAgenticMode() }) {
+                Image(systemName: "cpu")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundColor(socketClient.isAgenticModeEnabled ? .orange : .white.opacity(0.85))
+                    .frame(width: 30, height: 30)
+                    .shadow(color: socketClient.isAgenticModeEnabled ? .orange.opacity(0.5) : .clear, radius: 4)
+                    .opacity(socketClient.isConnected ? (socketClient.isAgenticModeTransitionPending ? 0.6 : 1.0) : 0.4)
+            }
+            .buttonStyle(.plain)
+            .disabled(!socketClient.isConnected || socketClient.isAgenticModeTransitionPending)
 
             Button(action: sendMessage) {
                 ZStack {

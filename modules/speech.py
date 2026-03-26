@@ -3,6 +3,7 @@ import os
 import threading
 import re
 import config
+from typing import Optional
 from utils.logger import get_logger
 
 # Import New Modular Components
@@ -141,6 +142,35 @@ class SpeechEngine:
             self.last_listen_status = "transcribe_failed"
         
         return text
+
+    def listen_confirmation(self, prompt: str, timeout: int = 10) -> Optional[bool]:
+        """
+        Speaks a prompt and waits for 'yes' or 'no' confirmation.
+        Returns:
+            True if 'yes', False if 'no', None if timeout/no response.
+        """
+        logger.info(f"❓ Requesting confirmation: {prompt}")
+        self.speak(prompt, allow_interruptions=False)
+        
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            text = self.listen_command()
+            if not text:
+                continue
+            
+            # Simple confirmation logic
+            yes_patterns = [r"\byes\b", r"\byeah\b", r"\byup\b", r"\bok\b", r"\bconfirm\b", r"\bdo it\b", r"\bproceed\b"]
+            no_patterns = [r"\bno\b", r"\bnah\b", r"\bnope\b", r"\bcancel\b", r"\bstop\b", r"\bdont\b"]
+            
+            if any(re.search(p, text) for p in yes_patterns):
+                logger.info("✅ User confirmed.")
+                return True
+            if any(re.search(p, text) for p in no_patterns):
+                logger.info("❌ User denied.")
+                return False
+                
+        logger.warning("🕒 Confirmation timed out.")
+        return None
 
     def _normalize_transcript(self, text):
         if not text:

@@ -6,6 +6,8 @@ import math
 import numpy as np
 import config
 from collections import deque
+from utils.logger import get_logger
+logger = get_logger()
 
 # --- ONE EURO FILTER (Standard for Low-Jitter Interaction) ---
 class OneEuroFilter:
@@ -186,7 +188,7 @@ class CursorController:
         cap.set(3, 640) 
         cap.set(4, 480)
         
-        print("🚀 Fluid Gesture Engine Active.")
+        logger.info("🚀 Fluid Gesture Engine Active.")
         
         exit_status = "NORMAL_EXIT"
         
@@ -194,7 +196,7 @@ class CursorController:
             while True:
                 success, img = cap.read()
                 if not success:
-                    print("❌ Camera read failed. Check permissions.")
+                    logger.error("❌ Camera read failed. Check permissions.")
                     # We can't speak here easily without circular import or passing speech engine, 
                     # but raising an exception allows commands.py to catch it.
                     raise Exception("Camera Access Denied or Device Busy")
@@ -259,9 +261,9 @@ class CursorController:
                             
                             # DEBUG PRINT
                             if gesture == "POINT":
-                                print(f"📍 POINT: ({final_x}, {final_y})")
+                                logger.debug(f"📍 POINT: ({final_x}, {final_y})")
                             elif gesture == "PINCH":
-                                print(f"👌 PINCH: ({final_x}, {final_y})")
+                                logger.debug(f"👌 PINCH: ({final_x}, {final_y})")
                                 
                             pyautogui.moveTo(final_x, final_y, duration=0)
 
@@ -356,7 +358,7 @@ class CursorController:
         except StopIteration:
             pass
         except Exception as e:
-            print(f"Cursor Error: {e}")
+            logger.error(f"Cursor Error: {e}")
         finally:
             if self.is_dragging: pyautogui.mouseUp()
             if cap.isOpened(): cap.release()

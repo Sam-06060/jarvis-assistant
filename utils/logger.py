@@ -20,10 +20,10 @@ class JarvisLogger:
     _hud_queue = None # For mirroring logs to desktop app
 
     @classmethod
-    def setup_logger(cls, name="Jarvis"):
+    def setup_logger(cls, name=None):
         """
         Setup global logging configuration.
-        Returns a logger instance.
+        Returns the root logger if name is None, otherwise a named logger.
         """
         if cls._instance:
             return cls._instance
@@ -32,10 +32,15 @@ class JarvisLogger:
         if not os.path.exists(LOG_DIR):
             os.makedirs(LOG_DIR)
         
-        # 2. Base Logger
+        # 2. Base Logger (None = Root Logger)
         logger = logging.getLogger(name)
         logger.setLevel(logging.DEBUG) # Catch ALL at root level, filter in handlers
-        logger.handlers = [] # Clear default handlers
+        # Only clear handlers if we are the first one setting it up
+        if not logger.handlers:
+            logger.handlers = [] 
+        else:
+             # Existing handlers found - we might be re-initializing or in a sub-process
+             return logger
         
         # 3. File Handler (Rotating: 5MB files, keep 5 backups)
         # We start a new log file for each session for clarity, but also rotate if it gets huge.

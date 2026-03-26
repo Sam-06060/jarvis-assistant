@@ -32,13 +32,13 @@ class AIBrain:
                 if self.cloud_available:
                     self.cloud_model = getattr(config, 'GROQ_CONVERSATION_MODEL', 
                                                getattr(config, 'GROQ_INTENT_MODEL', 'llama-3.3-70b-versatile'))
-                    print(f"☁️ Cloud Brain Ready ({self.cloud_model}) — Zero Heat Mode ❄️")
+                    logger.info(f"☁️ Cloud Brain Ready ({self.cloud_model}) — Zero Heat Mode ❄️")
                 else:
-                    print(f"⚠️ Cloud Brain unavailable — using Local Ollama")
+                    logger.info(f"⚠️ Cloud Brain unavailable — using Local Ollama")
             except Exception as e:
-                print(f"⚠️ Cloud Brain init failed: {e} — using Local Ollama")
+                logger.error(f"⚠️ Cloud Brain init failed: {e} — using Local Ollama")
         
-        print(f"🧠 Local Brain Ready ({self.local_model})")
+        logger.info(f"🧠 Local Brain Ready ({self.local_model})")
 
     @property
     def is_online(self):
@@ -49,43 +49,61 @@ class AIBrain:
         except:
             return False
 
-    def ask(self, text, context=None, web_search=False):
+    def ask(self, text, context=None, web_search=False, system_prompt=None, is_agentic=False):
         """
         Cloud-First Entry Point:
-        1. Try Groq Cloud (fast, powerful, zero heat)
-        2. Fall back to Local Ollama if cloud fails
+        1. If is_agentic, use the Master Agentic LLM Provider.
+        2. Otherwise, use standard Cloud-First logic.
         """
+        if is_agentic:
+            provider = getattr(config, "AGENTIC_LLM_PROVIDER", "ollama")
+            if provider != "ollama":
+                # Even if cloud_available was false at init, the Magic Key might have fixed it
+                if self.groq:
+                    response = self.groq.ask(text, system_prompt=system_prompt, provider=provider)
+                    if response:
+                        return response
+                elif self.cloud_available: # Legacy fallback
+                     response = self.groq.ask(text, system_prompt=system_prompt, provider=provider)
+                     if response:
+                         return response
+            # Fallback to local if cloud provider fails or is set to ollama
+            return self.ask_local_ollama(text, system_prompt=system_prompt, web_search=web_search)
+
         if self.cloud_available and getattr(config, 'CLOUD_FIRST_CONVERSATION', True):
-            cloud_response = self._ask_cloud(text, web_search=web_search)
+            cloud_response = self._ask_cloud(text, web_search=web_search, system_prompt=system_prompt)
             if cloud_response:
                 return cloud_response
             logger.warning("☁️ Cloud brain failed — falling back to local Ollama")
         
-        return self.ask_local_ollama(text, web_search=web_search)
+        return self.ask_local_ollama(text, system_prompt=system_prompt, web_search=web_search)
 
-    def _ask_cloud(self, user_input, web_search=False):
+    def _ask_cloud(self, user_input, web_search=False, system_prompt=None):
         """
         Cloud conversation via Groq (Llama 3.3 70B).
         Zero heat — all computation is remote.
         """
         try:
-            # Build the same context as local (persona, memory, web search)
-            system_prompt = self._build_system_prompt(user_input, web_search)
+            # Build persona + context if no custom system prompt provided
+            if not system_prompt:
+                system_prompt = self._build_system_prompt(user_input, web_search)
             
             # Web search context
             display_query = user_input
             if web_search:
                 display_query = self._contextualize_query(user_input)
-                print(f"🌍 Searching the web for: '{display_query}'")
+                logger.info(f"🌍 Searching the web for: '{display_query}'")
                 search_context = self.search_engine.search(display_query)
                 if search_context:
-                    print(f"📝 Injecting Context ({len(search_context)} chars)")
+                    logger.info(f"📝 Injecting Context ({len(search_context)} chars)")
                     system_prompt += self._web_search_prompt(search_context)
             
             final_query = display_query if web_search else user_input
             
-            # Call Groq cloud
+            # Call Groq cloud (Hardcoded to Groq for Normal Mode as per user preference)
             print(f"☁️ Asking Cloud Brain ({self.cloud_model})...")
+            
+            # Use _call_groq directly to ensure normal mode stays on the original path
             response = self.groq._call_groq(
                 prompt=final_query,
                 system_prompt=system_prompt,
@@ -96,10 +114,10 @@ class AIBrain:
                 # Auto-delivery for code blocks (same logic as local)
                 has_multiline_code = re.search(r"```[\w]*\n([\s\S]*?)\n```", response)
                 if has_multiline_code and len(has_multiline_code.group(1)) > 150:
-                    print("📦 Large Code detected. Delivering to Desktop...")
+                    logger.info("📦 Large Code detected. Delivering to Desktop...")
                     return self._deliver_code_to_desktop(response)
                 
-                print(f"☁️ Cloud response: {len(response)} chars (zero heat ❄️)")
+                logger.debug(f"☁️ Cloud response: {len(response)} chars (zero heat ❄️)")
                 return response
             
             return None
@@ -118,7 +136,7 @@ class AIBrain:
                 with open(config.PERSONA_FILE, 'r') as f:
                     system_prompt = f.read().strip()
         except Exception as e:
-            print(f"⚠️ Persona Load Error: {e}")
+            logger.error(f"⚠️ Persona Load Error: {e}")
 
         if not system_prompt:
             system_prompt = "You are Jarvis, a helpful AI assistant. Answer questions directly. If asked for code, generate full, complete code files. Never truncate code."
@@ -433,7 +451,7 @@ REWRITTEN QUERY:"""
             return "✅ Check your Desktop! I have generated the code and opened it in the viewer for you."
 
         except Exception as e:
-            print(f"⚠️ Code Delivery Failed: {e}")
+            logger.error(f"⚠️ Code Delivery Failed: {e}")
             return text # Fallback to raw text
 
     def _handle_code_generation(self, text):
