@@ -108,6 +108,33 @@ class SocketClient: ObservableObject {
         }))
     }
     
+    // NEW: Hot-Swap Audio Routing Hardware (Mac Built-in vs Bluetooth Defaults)
+    func setForceAudioStrategy(_ active: Bool) {
+        guard isConnected else {
+            print("⚠️ Ignoring audio route toggle while socket is disconnected.")
+            return
+        }
+        
+        let update: [String: Any] = ["key": "FORCE_MAC_BUILTIN_AUDIO", "value": active]
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: update),
+              let jsonString = String(data: jsonData, encoding: .utf8) else {
+            return
+        }
+        
+        let text = "__UPDATE_CONFIG__:\(jsonString)"
+        let json: [String: Any] = ["type": "command", "data": text]
+        guard let data = try? JSONSerialization.data(withJSONObject: json) else { return }
+        let payload = data + "\n".data(using: .utf8)!
+        
+        connection?.send(content: payload, completion: .contentProcessed({ error in
+            if let error = error {
+                print("Send Error (Audio Route): \(error)")
+            } else {
+                print("🎤 Requested Audio Hardware Swap -> \(active ? "Built-In" : "System Default")")
+            }
+        }))
+    }
+    
     func send(text: String, webSearch: Bool = false) {
         // 1. Optimistically append user message to UI
         let userMsg = JarvisMessage(type: "command", header: "USER", detail: nil, data: text)

@@ -233,8 +233,27 @@ class SpeechEngine:
         self.manual_sleep_requested = True
         self.is_interrupted = True
         self.tts.stop()
-        self.recorder.interrupt()
+        if hasattr(self.recorder, 'interrupt'):
+            self.recorder.interrupt()
         self.wake_engine.play_interrupt_sound()
+
+    def stop(self):
+        """Cleanly shut down the entire speech engine and release hardware interfaces."""
+        logger.info("🛑 Stopping SpeechEngine and releasing hardware...")
+        self.force_stop()
+        if getattr(self, 'recorder', None):
+            self.recorder.close_stream()
+            if getattr(self.recorder, 'pa', None):
+                try:
+                    self.recorder.pa.terminate()
+                except Exception as e:
+                    logger.debug(f"PyAudio terminate warning: {e}")
+                self.recorder.pa = None
+        
+        if getattr(self, 'wake_engine', None) and getattr(self.wake_engine, 'porcupine', None):
+             try:
+                 self.wake_engine.porcupine.delete()
+             except: pass
 
     def check_for_interrupt_passive(self):
         """
@@ -262,3 +281,8 @@ class SpeechEngine:
 
     def play_wake_sound(self):
         self.wake_engine.play_wake_sound()
+
+    def set_phrases(self, phrases: list[str]):
+        """Pass context phrases down to the speech recogniser."""
+        if hasattr(self.transcriber, 'model') and hasattr(self.transcriber.model, 'set_phrases'):
+            self.transcriber.model.set_phrases(phrases)

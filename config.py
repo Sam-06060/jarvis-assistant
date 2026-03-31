@@ -4,6 +4,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ============== AUDIO I/O SETTINGS ==============
+FORCE_MAC_BUILTIN_AUDIO = False
+
 # Assistant Configuration
 ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Jarvis")
 USER_NAME = os.getenv("USER_NAME", "Sir")

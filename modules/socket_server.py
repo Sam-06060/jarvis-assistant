@@ -113,11 +113,43 @@ class JarvisSocketServer:
                                     web_search=web_search,
                                     source="socket_api"
                                 )
-                                # Queue the validated object
+                                
+                                # ====== INSTANT HARDWARE ROUTING ======
+                                # Instead of queueing and waiting for Jarvis to IDLE, process Audio Routing instantly on receiving thread.
+                                if data.startswith("__UPDATE_CONFIG__"):
+                                    try:
+                                        json_str = data.replace("__UPDATE_CONFIG__:", "").strip()
+                                        payload_data = json.loads(json_str)
+                                        if payload_data.get("key") == "FORCE_MAC_BUILTIN_AUDIO":
+                                            val = payload_data.get("value")
+                                            import config
+                                            setattr(config, "FORCE_MAC_BUILTIN_AUDIO", val)
+                                            # Write to disk asynchronously if needed, but in-memory applies immediately.
+                                            from core.registry import ServiceRegistry
+                                            sp = ServiceRegistry.get("speech")
+                                            if sp:
+                                                logger.info(f"⚡️ Hot-Swapping Audio Engine to {'Mac Built-in' if val else 'System Default'}...")
+                                                if hasattr(sp, 'recorder'):
+                                                    # Use a safe flag to reload PyAudio exactly between read frames on the main thread
+                                                    sp.recorder.needs_reinit = True
+                                                if hasattr(sp, 'tts'):
+                                                    # Flag TTS to hop output audio devices mid-sentence synchronously
+                                                    sp.tts.needs_hotswap = True
+                                                
+                                            # If it's just audio update, we don't even need to queue it. 
+                                            # Let Jarvis handle the disk update when it reaches idle, but route is applied NOW.
+                                            self.input_queue.put(command_obj.dict())
+                                            continue
+                                    except Exception as e:
+                                        logger.error(f"Failed to apply instant audio swap: {e}")
+                                        
+                                # Queue the validated object for normal processing (Agentic toggle, etc)
                                 self.input_queue.put(command_obj.dict())
+                                
                             except Exception as e:
                                 logger.error(f"❌ Invalid Command Data: {e}")
                                 continue
+
 
                         elif message.get("type") == "config":
                             if self.input_queue:

@@ -883,6 +883,11 @@ class JarvisApp:
                 # Still persist to file
                 self._update_atomic_config("ENABLE_AGENTIC_MODE", value)
 
+            elif key == "FORCE_MAC_BUILTIN_AUDIO":
+                # Only write to disk here. The live mem-config and PyAudio hot-swap 
+                # are already executed instantly by socket_server.py asynchronously.
+                self._update_atomic_config("FORCE_MAC_BUILTIN_AUDIO", value)
+
         except Exception as e:
             logger.error(f"❌ Config Update Error: {e}")
 

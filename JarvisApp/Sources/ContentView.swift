@@ -11,6 +11,10 @@ struct ContentView: View {
     @State private var inputText = ""
     @State private var isWebSearchEnabled = false
     @State private var showChat = false
+    
+    // UI states for Audio toggle
+    @AppStorage("FORCE_MAC_BUILTIN_AUDIO") private var forceBuiltInAudio = true
+    @State private var showSettingsSidebar = false
 
     private var chatMessages: [JarvisMessage] {
         socketClient.messages.filter {
@@ -45,6 +49,30 @@ struct ContentView: View {
                     }
                 }
                 .background(Color.black)
+            }
+            .overlay(alignment: .topTrailing) {
+                 Button(action: {
+                     withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                         showSettingsSidebar.toggle()
+                     }
+                 }) {
+                     Image(systemName: "gearshape.fill")
+                         .font(.system(size: 18))
+                         .foregroundColor(.white.opacity(0.6))
+                         .padding(16)
+                         .contentShape(Rectangle())
+                 }
+                 .buttonStyle(.plain)
+                 .padding(.top, 14)
+                 .padding(.trailing, 18)
+            }
+            .overlay(alignment: .trailing) {
+                 if showSettingsSidebar {
+                     SettingsSidebar(forceBuiltInAudio: $forceBuiltInAudio, showSettingsSidebar: $showSettingsSidebar)
+                         .environmentObject(socketClient)
+                         .transition(.move(edge: .trailing))
+                         .zIndex(100)
+                 }
             }
 
             if socketClient.isFlashOverlayVisible {
@@ -1610,5 +1638,72 @@ private extension Color {
             blue: Double(hex & 0xFF) / 255.0,
             opacity: alpha
         )
+    }
+}
+
+// MARK: - Settings Sidebar
+struct SettingsSidebar: View {
+    @Binding var forceBuiltInAudio: Bool
+    @Binding var showSettingsSidebar: Bool
+    @EnvironmentObject var socketClient: SocketClient
+
+    var body: some View {
+        ZStack(alignment: .trailing) {
+            Color.black.opacity(0.4)
+                .ignoresSafeArea()
+                .onTapGesture {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                        showSettingsSidebar = false
+                    }
+                }
+
+            HStack(spacing: 0) {
+                Spacer()
+
+                VStack(alignment: .leading, spacing: 24) {
+                    HStack {
+                        Text("Settings")
+                            .font(.system(size: 22, weight: .bold))
+                            .foregroundColor(.white)
+                        Spacer()
+                        Button(action: {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                showSettingsSidebar = false
+                            }
+                        }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 20))
+                                .foregroundColor(.white.opacity(0.6))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.top, 24)
+                    .padding(.horizontal, 24)
+
+                    Divider().background(Color.white.opacity(0.1))
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        Toggle("Force Mac Built-in Audio", isOn: $forceBuiltInAudio)
+                            .toggleStyle(SwitchToggleStyle(tint: .blue))
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundColor(.white)
+                            .onChange(of: forceBuiltInAudio) { newValue in
+                                socketClient.setForceAudioStrategy(newValue)
+                            }
+                        
+                        Text("When enabled, Jarvis bypasses your Bluetooth default and forces the physical Mac microphone and speakers. Prevents call interruptions!")
+                            .font(.system(size: 13))
+                            .foregroundColor(.white.opacity(0.5))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.horizontal, 24)
+
+                    Spacer()
+                }
+                .frame(width: 320)
+                .background(Color(hex: 0x1A1A1E).ignoresSafeArea())
+                .shadow(color: .black.opacity(0.5), radius: 20, x: -10, y: 0)
+            }
+        }
     }
 }

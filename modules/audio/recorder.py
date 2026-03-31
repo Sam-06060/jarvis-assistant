@@ -43,8 +43,10 @@ class AudioRecorder:
         self.format = pyaudio.paInt16
         
         self.is_interrupted = False
+        self.needs_reinit = False
         self.last_record_status = "idle"
         self.consecutive_read_failures = 0
+        self.input_device_index = None
         
         # Initialize PyAudio
         self._init_audio()
@@ -63,6 +65,17 @@ class AudioRecorder:
             try:
                 with suppress_c_warnings():
                     self.pa = pyaudio.PyAudio()
+                
+                # Honor config for physical Mac mic
+                self.input_device_index = None
+                if getattr(config, "FORCE_MAC_BUILTIN_AUDIO", False):
+                    for i in range(self.pa.get_device_count()):
+                        dev = self.pa.get_device_info_by_index(i)
+                        name = dev.get("name", "").lower()
+                        if ("macbook" in name or "imac" in name or "mac mini" in name or "built-in" in name) and dev.get("maxInputChannels", 0) > 0:
+                            self.input_device_index = i
+                            logger.info(f"🎤 Forcing Built-In Mic: {dev.get('name')} (Index: {i})")
+                            break
                 return
             except Exception as e:
                 logger.warning(f"Audio Init fail ({attempt}): {e}")
@@ -95,13 +108,14 @@ class AudioRecorder:
 
         try:
              with suppress_c_warnings():
-                 self.stream = self.pa.open(
-                    rate=self.rate,
-                    channels=self.channels,
-                    format=self.format,
-                    input=True,
-                    frames_per_buffer=self.chunk
-                )
+                     self.stream = self.pa.open(
+                        rate=self.rate,
+                        channels=self.channels,
+                        format=self.format,
+                        input=True,
+                        input_device_index=self.input_device_index,
+                        frames_per_buffer=self.chunk
+                    )
              return self.stream
         except Exception as e:
             logger.error(f"Failed to open stream: {e}")
@@ -116,6 +130,7 @@ class AudioRecorder:
                         channels=self.channels,
                         format=self.format,
                         input=True,
+                        input_device_index=self.input_device_index,
                         frames_per_buffer=self.chunk
                     )
                  return self.stream
@@ -144,6 +159,10 @@ class AudioRecorder:
 
     def read_chunk(self):
         """Reads a single chunk from stream, enforcing strict buffer sizes."""
+        if getattr(self, "needs_reinit", False):
+            self.needs_reinit = False
+            self._reinit_audio_system()
+            
         if not self.stream: self.open_stream()
         if not self.stream:
             self.consecutive_read_failures += 1

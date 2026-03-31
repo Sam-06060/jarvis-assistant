@@ -26,7 +26,7 @@ class TextToSpeech:
         self.voice_enabled = not self.voice_enabled
         return self.voice_enabled
 
-    def speak(self, text, wake_word_engine=None, audio_stream=None, force_speak=False, allow_interruptions=True):
+    def speak(self, text, wake_word_engine=None, audio_stream=None, force_speak=False, allow_interruptions=True, is_hotswap_resume=False):
         """
         Speaks text using system TTS. 
         Supports "Barge-In" if wake_word_engine and audio_stream are provided.
@@ -44,14 +44,14 @@ class TextToSpeech:
             if len(text) > 100:
                 text = text[:97] + "..."
         
-        logger.info(f"🤖 {config.ASSISTANT_NAME}: {text}")
-        
-        # --- HUD UPDATE ---
-        if self.hud_queue:
-            # Send to Conversation Log ("JARVIS") instead of Status Header ("IDLE")
-            # This ensures the text appears in the main chat box.
-            self.hud_queue.put(("JARVIS", text))
-        # ------------------
+        if not is_hotswap_resume:
+            logger.info(f"🤖 {config.ASSISTANT_NAME}: {text}")
+            # --- HUD UPDATE ---
+            if self.hud_queue:
+                # Send to Conversation Log ("JARVIS") instead of Status Header ("IDLE")
+                # This ensures the text appears in the main chat box.
+                self.hud_queue.put(("JARVIS", text))
+            # ------------------
         
         if not self.voice_enabled:
             return False
@@ -67,11 +67,30 @@ class TextToSpeech:
         self._kill_process()
 
         # 4. Start Process (With Retry)
+        cmd = ["say", "-r", str(rate)]
+        
+        if getattr(config, "FORCE_MAC_BUILTIN_AUDIO", False):
+            try:
+                out = subprocess.check_output(['say', '-a', '?'], stderr=subprocess.DEVNULL).decode()
+                device_id = None
+                for line in out.split('\n'):
+                    if not line.strip(): continue
+                    lower_line = line.lower()
+                    if any(x in lower_line for x in ["macbook", "imac", "built-in", "mac mini", "speakers"]):
+                        device_id = line.split()[0]
+                        break
+                if device_id:
+                    cmd.extend(["-a", device_id])
+            except Exception as e:
+                logger.debug(f"Audio device check failed: {e}")
+                
+        cmd.append(text)
+
         max_retries = 2
         for attempt in range(max_retries):
             try:
                 self.current_process = subprocess.Popen(
-                    ["say", "-r", str(rate), text],
+                    cmd,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
                     text=True
@@ -97,8 +116,27 @@ class TextToSpeech:
 
         interrupted = False
 
-        # 4. Monitor Loop (for Barge-In)
+        # Main monitoring loop
+        words_per_sec = rate / 60.0
+        start_time = time.time()
+        
         while self.current_process and self.current_process.poll() is None:
+            # Check for synchronous TTS hardware hot-swap
+            if getattr(self, "needs_hotswap", False):
+                self.needs_hotswap = False
+                logger.info("🔄 TTS Output Hot-swap engaged! Rerouting playing audio...")
+                self._kill_process()
+                
+                # Estimate remaining text based on elapsed playback time
+                elapsed = time.time() - start_time
+                words_spoken = int(elapsed * words_per_sec)
+                words = text.split()
+                if words_spoken < len(words):
+                    remaining_text = " ".join(words[words_spoken:])
+                    # Recurse synchronously into the new hardware driver with the unread words
+                    return self.speak(remaining_text, wake_word_engine, audio_stream, force_speak, allow_interruptions, is_hotswap_resume=True)
+                break
+                
             # Check external interrupt
             if getattr(self, "is_interrupted", False): # Flag set by controller
                  self._kill_process()
@@ -106,12 +144,14 @@ class TextToSpeech:
                  break
 
             # Check Wake Word (if provided AND interruptions allowed)
-            if allow_interruptions and wake_word_engine and audio_stream and audio_stream.is_active():
+            stream_active = False
+            try:
+                stream_active = allow_interruptions and wake_word_engine and audio_stream and audio_stream.is_active()
+            except Exception:
+                pass # Hot-Swap or PyAudio stream drop in progress
+                
+            if stream_active:
                 try:
-                    # Non-blocking check would be ideal, but Porcupine needs frames.
-                    # We only read if enough data is available to avoid blocking the loop too long?
-                    # Or just read blocking? The `say` command runs in background, so blocking here is fine 
-                    # as long as we check process status.
                     if audio_stream.get_read_available() >= wake_word_engine.frame_length:
                         pcm = audio_stream.read(wake_word_engine.frame_length, exception_on_overflow=False)
                         if wake_word_engine.process(pcm):
@@ -123,7 +163,7 @@ class TextToSpeech:
                     else:
                         time.sleep(0.02) # Yield
                 except Exception as e:
-                    logger.debug(f"TTS Wake check error: {e}")
+                    logger.debug(f"TTS Wake check error (possibly hotwapping): {e}")
             else:
                 time.sleep(0.05)
 
