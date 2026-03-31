@@ -45,6 +45,29 @@ class ProcessManager: ObservableObject {
         env["LC_ALL"] = "en_US.UTF-8"
         env["LANG"] = "en_US.UTF-8"
         env["PYTHONUNBUFFERED"] = "1"
+
+        // Load .env file so Python backend has ST_* credentials even when
+        // the app is launched from Finder/Dock (no shell environment).
+        let dotEnvPath = "\(projectRoot)/.env"
+        if let lines = try? String(contentsOfFile: dotEnvPath, encoding: .utf8) {
+            print("🔑 [ProcessManager] Loading .env from: \(dotEnvPath)")
+            for line in lines.components(separatedBy: .newlines) {
+                let t = line.trimmingCharacters(in: .whitespaces)
+                guard !t.hasPrefix("#"), !t.isEmpty else { continue }
+                let parts = t.split(separator: "=", maxSplits: 1).map(String.init)
+                guard parts.count == 2 else { continue }
+                let k = parts[0].trimmingCharacters(in: .whitespaces)
+                var v = parts[1].trimmingCharacters(in: .whitespaces)
+                if (v.hasPrefix("\"") && v.hasSuffix("\"")) || (v.hasPrefix("'") && v.hasSuffix("'")) {
+                    v = String(v.dropFirst().dropLast())
+                }
+                // Process env wins — only set if not already present
+                if env[k] == nil { env[k] = v }
+            }
+        } else {
+            print("⚠️ [ProcessManager] .env not found at \(dotEnvPath) — ST_* vars may be missing.")
+        }
+
         process?.environment = env
         
         // Run script directly

@@ -9,8 +9,11 @@ prompts (e.g., "I'm burning", "make it 20", "room temperature", "increase it").
 """
 
 import re
+import os
 import logging
 import time
+import urllib.request
+import json
 from modules.smartthings import SmartThingsManager, SmartThingsError
 from modules.skills.base import Skill
 
@@ -32,7 +35,8 @@ PATTERNS = [
     # AC_ON
     (INTENT_AC_ON, re.compile(
         r"\b(turn\s+on|switch\s+on|power\s+on|start|activate).*(ac|air\s*con|hvac|cooling)\b"
-        r"|\b(turn\s+on|start)\s+(the\s+)?(ac|air\s*con)\b"
+        r"|\b(turn|switch)\s+(the\s+)?(ac|air\s*con)\s+(on|back\s+on)\b"  # 'turn the ac on'
+        r"|\b(ac|air\s*con)\s+on\b"
         r"|\bcool.*room\s+down\b"
         r"|\b(it's|its|it is|i am|im|i'm).*(hot|warm|stuffy|burning|boiling|roasting)\b"
         r"|\b(could\s+you\s+please\s+turn\s+on\s+the\s+ac|turn\s+on\s+the\s+ac\s+god\s*dammit)\b",
@@ -42,6 +46,7 @@ PATTERNS = [
     # AC_OFF
     (INTENT_AC_OFF, re.compile(
         r"\b(turn\s+off|switch\s+off|power\s+off|stop|disable|shut\s+down).*(ac|air\s*con|hvac|cooling)\b"
+        r"|\b(turn|switch)\s+(the\s+)?(ac|air\s*con)\s+off\b"  # 'turn the ac off'
         r"|\b(it's|its|it is|i am|im|i'm).*(cold|freezing|too\s+cold|chilly)\b"
         r"|\b(turn\s+off\s+ac|ac\s+off|shut\s+ac)\b",
         re.IGNORECASE
@@ -103,71 +108,80 @@ class SmartThingsSkill(Skill):
     SKILL_NAME = "SmartThingsSkill"
     PRIORITY = 0
 
+    # Context window: bare "turn off/on" within this many seconds of an AC command = AC command
+    CONTEXT_WINDOW_SECS = 180
+
     def __init__(self, app_context, manager: SmartThingsManager = None):
         super().__init__(app_context)
-        self._manager = manager or SmartThingsManager()
         self.last_ac_interaction = 0
-        logger.info("[SmartThingsSkill] Initialised with hyper-advanced NLP.")
+        # Use provided manager (tests) or create one that reads from env
+        self._manager = manager or SmartThingsManager()
+        logger.info("[SmartThingsSkill] Initialised. AC commands route via Python → SmartThings API.")
+
+    def _in_ac_context(self) -> bool:
+        """Returns True if an AC command was used within the context window."""
+        return (time.time() - self.last_ac_interaction) < self.CONTEXT_WINDOW_SECS
 
     def can_handle(self, user_input: str) -> bool:
         cleaned = user_input.strip().lower()
-        
-        # Protective Guard: If they explicitly ask about weather, let WeatherSkill/LLM handle it
-        if ("weather" in cleaned or "outside" in cleaned) and not "ac" in cleaned:
+
+        # Guard: weather questions go elsewhere
+        if ("weather" in cleaned or "outside" in cleaned) and "ac" not in cleaned:
             return False
 
+        # Primary: regex intent matched
         intent, _ = self._detect_intent(cleaned)
         if intent:
-            # Add some context guard here so that overly general phrases (like just numbers)
-            # are only matched if we know we are talking about AC, unless it explicitly matches AC perfectly.
-            # But the regexes are tuned to be highly AC specific (e.g. "make it 20" or "set temp to 22"),
-            # so we'll trust the regex.
-            logger.debug("[SmartThingsSkill] Matched intent '%s' for input: '%s'", intent, user_input[:60])
+            logger.debug("[SmartThingsSkill] Matched intent '%s' for: '%s'", intent, user_input[:60])
             return True
-            
+
+        # Context-aware: bare "turn off / switch off / turn on / switch on"
+        # within CONTEXT_WINDOW after an AC command → AC command, not shutdown
+        if self._in_ac_context():
+            if re.match(r'^(turn|switch)\s+off\s*$', cleaned):
+                logger.debug("[SmartThingsSkill] Context match: AC_OFF for bare '%s'", cleaned)
+                return True
+            if re.match(r'^(turn|switch)\s+on\s*$', cleaned):
+                logger.debug("[SmartThingsSkill] Context match: AC_ON for bare '%s'", cleaned)
+                return True
+
         return False
 
     def handle(self, user_input: str) -> str:
         cleaned = user_input.strip().lower()
         intent, match = self._detect_intent(cleaned)
-        
-        # Track context timeframe
+
+        # Resolve context-based intents that didn't match a full regex
+        if intent is None and self._in_ac_context():
+            if re.match(r'^(turn|switch)\s+off\s*$', cleaned):
+                intent = INTENT_AC_OFF
+            elif re.match(r'^(turn|switch)\s+on\s*$', cleaned):
+                intent = INTENT_AC_ON
+
         self.last_ac_interaction = time.time()
         logger.info("[SmartThingsSkill] Executing intent '%s'", intent)
 
-        try:
-            result = None
-            if intent == INTENT_AC_ON:
-                result = self._handle_on()
-            elif intent == INTENT_AC_OFF:
-                result = self._handle_off()
-            elif intent == INTENT_SET_TEMP:
-                result = self._handle_set_temp(match)
-            elif intent == INTENT_TEMP_UP:
-                result = self._handle_temp_up()
-            elif intent == INTENT_TEMP_DOWN:
-                result = self._handle_temp_down()
-            elif intent == INTENT_SET_MODE:
-                result = self._handle_set_mode(match)
-            elif intent == INTENT_AC_STATUS:
-                result = self._handle_status()
-            else:
-                result = "I couldn't determine what you wanted to do with the AC."
-                
-            if result and hasattr(self, 'speech') and self.speech is not None:
-                self.speech.speak(result)
-            return result
-            
-        except ValueError as e:
-            res = f"I couldn't do that. {str(e)}"
-            if hasattr(self, 'speech') and self.speech is not None:
-                self.speech.speak(res)
-            return res
-        except SmartThingsError as e:
-            res = f"There was a problem communicating with your AC. {str(e)}"
-            if hasattr(self, 'speech') and self.speech is not None:
-                self.speech.speak(res)
-            return res
+        result = None
+        if intent == INTENT_AC_ON:
+            result = self._handle_on()
+        elif intent == INTENT_AC_OFF:
+            result = self._handle_off()
+        elif intent == INTENT_SET_TEMP:
+            result = self._handle_set_temp(match)
+        elif intent == INTENT_TEMP_UP:
+            result = self._handle_temp_up()
+        elif intent == INTENT_TEMP_DOWN:
+            result = self._handle_temp_down()
+        elif intent == INTENT_SET_MODE:
+            result = self._handle_set_mode(match)
+        elif intent == INTENT_AC_STATUS:
+            result = self._handle_status()
+        else:
+            result = "I couldn't determine what you wanted to do with the AC."
+
+        if result and hasattr(self, 'speech') and self.speech is not None:
+            self.speech.speak(result)
+        return result
 
     # ── Intent Detection ─────────────────────────────────────────────────────
 
@@ -178,15 +192,23 @@ class SmartThingsSkill(Skill):
                 return intent, match
         return None, None
 
-    # ── Intent Handlers ──────────────────────────────────────────────────────
+    # ── Intent Handlers — direct Python API calls ─────────────────────────────
 
     def _handle_on(self) -> str:
-        self._manager.turn_on()
-        return "The AC has been started for you, sir."
+        try:
+            self._manager.turn_on()
+            return "Turning the AC on."
+        except SmartThingsError as e:
+            logger.error("[SmartThingsSkill] turn_on failed: %s", e)
+            return f"I couldn't turn the AC on. {e}"
 
     def _handle_off(self) -> str:
-        self._manager.turn_off()
-        return "AC powered off."
+        try:
+            self._manager.turn_off()
+            return "Turning the AC off."
+        except SmartThingsError as e:
+            logger.error("[SmartThingsSkill] turn_off failed: %s", e)
+            return f"I couldn't turn the AC off. {e}"
 
     def _handle_set_temp(self, match) -> str:
         raw_temp = (
@@ -196,53 +218,68 @@ class SmartThingsSkill(Skill):
             match.group("temp4")
         )
         if not raw_temp:
-            return "I heard a temperature command but couldn't exact the degrees."
-
-        celsius = float(raw_temp)
-        self._manager.set_temperature(celsius)
-        return f"Temperature is now set to {celsius:.0f} degrees."
+            return "I couldn't determine the temperature you wanted."
+        try:
+            celsius = float(raw_temp)
+            self._manager.set_temperature(celsius)
+            return f"Setting the temperature to {int(celsius)} degrees."
+        except ValueError as e:
+            return f"That temperature is out of range. {e}"
+        except SmartThingsError as e:
+            return f"I couldn't set the temperature. {e}"
 
     def _handle_temp_up(self) -> str:
-        status = self._manager.get_status()
-        current = status.get("coolingSetpoint")
-        if current is None:
-            return "I couldn't retrieve the current temperature to increase it."
-        
-        new_temp = current + 1
-        self._manager.set_temperature(new_temp)
-        return f"Temperature increased to {new_temp:.0f} degrees."
+        try:
+            status = self._manager.get_status()
+            current = status.get("coolingSetpoint")
+            if current is None:
+                return "I couldn't read the current temperature to increase it."
+            new_temp = int(current) + 1
+            self._manager.set_temperature(new_temp)
+            return f"Increasing the temperature to {new_temp} degrees."
+        except SmartThingsError as e:
+            return f"I couldn't increase the temperature. {e}"
 
     def _handle_temp_down(self) -> str:
-        status = self._manager.get_status()
-        current = status.get("coolingSetpoint")
-        if current is None:
-            return "I couldn't retrieve the current temperature to decrease it."
-        
-        new_temp = current - 1
-        self._manager.set_temperature(new_temp)
-        return f"Temperature decreased. It's now {new_temp:.0f} degrees."
+        try:
+            status = self._manager.get_status()
+            current = status.get("coolingSetpoint")
+            if current is None:
+                return "I couldn't read the current temperature to decrease it."
+            new_temp = int(current) - 1
+            self._manager.set_temperature(new_temp)
+            return f"Decreasing the temperature to {new_temp} degrees."
+        except SmartThingsError as e:
+            return f"I couldn't decrease the temperature. {e}"
 
     def _handle_set_mode(self, match) -> str:
         raw_mode = match.group("mode") or match.group("mode2")
         if not raw_mode:
             return "I couldn't determine which mode you wanted."
-
-        mode = raw_mode.lower().strip()
-        mode = MODE_NORMALISE.get(mode, mode)
-        self._manager.set_mode(mode)
-        return f"AC has been switched to {mode} mode."
+        mode = MODE_NORMALISE.get(raw_mode.lower().strip(), raw_mode.lower().strip())
+        try:
+            self._manager.set_mode(mode)
+            return f"Setting AC to {mode} mode."
+        except (SmartThingsError, ValueError) as e:
+            return f"I couldn't set the AC mode. {e}"
 
     def _handle_status(self) -> str:
-        status = self._manager.get_status()
-        switch_state = status.get("switch", "unknown")
-        temp = status.get("temperature")
-        setpoint = status.get("coolingSetpoint")
-        mode = status.get("airConditionerMode", "unknown")
+        try:
+            s = self._manager.get_status()
+            switch = s.get("switch", "unknown")
+            temp   = s.get("temperature")
+            setpt  = s.get("coolingSetpoint")
+            mode   = s.get("airConditionerMode", "unknown")
+            fan    = s.get("fanMode", "")
 
-        parts = [f"The AC is {switch_state}."]
-        if temp is not None:
-            parts.append(f"Current room temperature is {temp} degrees.")
-        if setpoint is not None and switch_state == "on":
-            parts.append(f"It is set to {setpoint} degrees.")
-        parts.append(f"Operating in {mode} mode.")
-        return " ".join(parts)
+            parts = [f"The AC is currently {switch}."]
+            if temp is not None:
+                parts.append(f"Room temperature is {int(temp)} degrees Celsius.")
+            if setpt is not None and switch == "on":
+                parts.append(f"Set to {int(setpt)} degrees.")
+            if switch == "on":
+                parts.append(f"Running in {mode} mode" + (f" with {fan} fan." if fan else "."))
+            return " ".join(parts)
+        except SmartThingsError as e:
+            return f"I couldn't fetch the AC status. {e}"
+

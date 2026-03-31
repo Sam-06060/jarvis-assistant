@@ -228,6 +228,8 @@ class JarvisApp:
         api_input_queue = queue.Queue()
         self.api_server = JarvisSocketServer(port=8492, input_queue=api_input_queue, hud_queue=self.hud_queue)
         self.api_server.start()
+        # Make the socket server accessible to skills via the registry
+        ServiceRegistry.register("socket_server", self.api_server)
         
         # Wrap hud_queue for broadcasting to socket (Desktop App syncing)
         self._wrap_hud_queue_for_sockets()

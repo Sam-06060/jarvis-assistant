@@ -25,7 +25,11 @@ class SocketClient: ObservableObject {
     @Published var isFlashOverlayVisible: Bool = false
     @Published var isAgenticModeEnabled: Bool = false
     @Published var isAgenticModeTransitionPending: Bool = false
-    
+
+    // Injected reference to the native AC hardware bridge.
+    // Set by JarvisApp after both objects are initialised.
+    var acController: JarvisACController?
+
     private var connection: NWConnection?
     private let queue = DispatchQueue(label: "SocketQueue")
     private var lastFeedbackHeader: String = ""
@@ -201,6 +205,14 @@ class SocketClient: ObservableObject {
                         self.isFlashOverlayVisible = (msg.detail?.uppercased() == "ON")
                         return
                     }
+
+                    // 2c. AC hardware command signals from Python backend.
+                    // Signals never appear as chat messages — they are consumed here.
+                    // Protocol: __AC_ON__, __AC_OFF__, __AC_TEMP_22__, __AC_MODE_cool__
+                    if let data = msg.data, data.hasPrefix("__AC_") {
+                        self.handleACCommand(data)
+                        return
+                    }
                     
                     // 3. FINAL MESSAGE (Clear Caption)
                     self.liveCaption = "" 
@@ -261,7 +273,53 @@ class SocketClient: ObservableObject {
             isAgenticModeTransitionPending = false
         }
     }
-}
+
+    // MARK: - AC Hardware Command Dispatch
+
+    /// Parse an `__AC_*__` signal and forward it to JarvisACController.
+    /// Called on main thread from inside decodeAndAppend.
+    private func handleACCommand(_ signal: String) {
+        guard let ac = acController else {
+            print("⚠️ [SocketClient] AC signal '\(signal)' received but acController is not wired.")
+            return
+        }
+
+        // Strip surrounding underscores: "__AC_ON__" → "AC_ON"
+        let stripped = signal
+            .trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+            .uppercased()
+
+        switch stripped {
+        case "AC_ON":
+            Task { await ac.turnOn() }
+        case "AC_OFF":
+            Task { await ac.turnOff() }
+        case "AC_TEMP_UP":
+            Task { await ac.adjustTemperature(by: +1) }
+        case "AC_TEMP_DOWN":
+            Task { await ac.adjustTemperature(by: -1) }
+        case "AC_STATUS":
+            Task { await ac.logStatus() }
+        default:
+            // __AC_TEMP_22__ → "AC_TEMP_22"
+            if stripped.hasPrefix("AC_TEMP_") {
+                let tempStr = stripped.replacingOccurrences(of: "AC_TEMP_", with: "")
+                if let celsius = Int(tempStr) {
+                    Task { await ac.setTemperature(to: celsius) }
+                } else {
+                    print("⚠️ [SocketClient] Could not parse temperature from signal: \(signal)")
+                }
+            // __AC_MODE_cool__ → "AC_MODE_COOL"
+            } else if stripped.hasPrefix("AC_MODE_") {
+                let mode = stripped.replacingOccurrences(of: "AC_MODE_", with: "").lowercased()
+                Task { await ac.setMode(mode) }
+            } else {
+                print("⚠️ [SocketClient] Unrecognised AC signal: \(signal)")
+            }
+        }
+    }
+
+} // end SocketClient
 
 // Helper strict struct for decoding
 struct JarvisMsgRaw: Decodable {

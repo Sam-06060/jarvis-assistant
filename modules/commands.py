@@ -98,7 +98,9 @@ class CommandProcessor:
             'reminders': self.registry.get('reminders'),
             'mimic': self.registry.get('mimic') or self.mimic, 
             'translator': self.registry.get('translator'),
-            'alarm_manager': self.registry.get('alarms')
+            'alarm_manager': self.registry.get('alarms'),
+            # AC bridge: gives skills access to socket broadcast_signal() for Swift OAuth routing
+            'socket_server': self.registry.get('socket_server'),
         }
         
         # 5. Register Skills (Priority Order)
@@ -586,37 +588,43 @@ class CommandProcessor:
 
         class ACControlTool:
             name = "control_ac"
-            description = "Controls the Samsung air conditioner via SmartThings. Input: {'action': 'turn_on'|'turn_off'|'set_temperature'|'set_mode'|'get_status', 'temperature_celsius': float (optional), 'mode': str (optional: 'cool'|'heat'|'auto'|'dry'|'fanOnly')}"
+            description = "Controls the Samsung air conditioner via SmartThings. Input: {'action': 'turn_on'|'turn_off'|'set_temperature'|'set_mode'|'get_status'|'temp_up'|'temp_down', 'temperature_celsius': int (optional), 'mode': str (optional: 'cool'|'heat'|'auto'|'dry'|'fanOnly')}"
             def __init__(self, cp): self.cp = cp
+
+            def _emit(self, signal: str) -> str:
+                """Relay an __AC_*__ signal via the Swift OAuth bridge."""
+                server = self.cp.app_context.get('socket_server')
+                if server and server.clients:
+                    server.broadcast_signal(signal)
+                    return None  # Success — caller builds the response string
+                return "The Jarvis Swift app isn't connected. Make sure it's running."
+
             def run(self, inp):
-                try:
-                    from modules.smartthings import SmartThingsManager
-                    manager = getattr(self.cp, '_smartthings_manager', None)
-                    if not manager:
-                        self.cp._smartthings_manager = SmartThingsManager()
-                        manager = self.cp._smartthings_manager
-                    
-                    action = inp.get("action")
-                    if action == "turn_on":
-                        manager.turn_on()
-                        return "The AC has been turned on."
-                    elif action == "turn_off":
-                        manager.turn_off()
-                        return "The AC has been turned off."
-                    elif action == "set_temperature":
-                        temp = float(inp.get("temperature_celsius", 24))
-                        manager.set_temperature(temp)
-                        return f"The AC temperature has been set to {temp}°C."
-                    elif action == "set_mode":
-                        mode = inp.get("mode", "cool")
-                        manager.set_mode(mode)
-                        return f"The AC mode has been set to {mode}."
-                    elif action == "get_status":
-                        status = manager.get_status()
-                        return f"AC is {status.get('switch')}. Room temp: {status.get('temperature')}°C. Setpoint: {status.get('coolingSetpoint')}°C. Mode: {status.get('airConditionerMode')}."
-                    return f"Unknown AC action: '{action}'."
-                except Exception as e:
-                    return f"AC control failed: {str(e)}"
+                action = inp.get("action", "")
+                if action == "turn_on":
+                    err = self._emit("__AC_ON__")
+                    return err or "The AC has been turned on."
+                elif action == "turn_off":
+                    err = self._emit("__AC_OFF__")
+                    return err or "The AC has been turned off."
+                elif action == "temp_up":
+                    err = self._emit("__AC_TEMP_UP__")
+                    return err or "Temperature increased by one degree."
+                elif action == "temp_down":
+                    err = self._emit("__AC_TEMP_DOWN__")
+                    return err or "Temperature decreased by one degree."
+                elif action == "set_temperature":
+                    temp = int(float(inp.get("temperature_celsius", 24)))
+                    err = self._emit(f"__AC_TEMP_{temp}__")
+                    return err or f"AC temperature set to {temp}°C."
+                elif action == "set_mode":
+                    mode = str(inp.get("mode", "cool")).lower()
+                    err = self._emit(f"__AC_MODE_{mode}__")
+                    return err or f"AC mode set to {mode}."
+                elif action == "get_status":
+                    err = self._emit("__AC_STATUS__")
+                    return err or "Fetching AC status — check the Swift app console."
+                return f"Unknown AC action: '{action}'."
 
         class AppControlTool:
             name = "control_app"

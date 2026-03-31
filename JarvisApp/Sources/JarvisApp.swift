@@ -6,19 +6,24 @@ import AVFoundation
 struct JarvisApp: App {
     @StateObject var processManager = ProcessManager()
     @StateObject var socketClient = SocketClient()
-    
+    @StateObject var acController = JarvisACController()
+
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(processManager)
                 .environmentObject(socketClient)
+                .environmentObject(acController)
                 .onAppear {
                     // Request Permissions explicitly to trigger macOS Prompt
                     requestPermissions()
-                    
+
+                    // Wire AC hardware bridge into the socket client
+                    socketClient.acController = acController
+
                     // Start Jarvis when app launches
                     processManager.startJarvis()
-                    
+
                     // Connect to Socket after short delay
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
                         socketClient.connect()

@@ -219,7 +219,16 @@ class AgentConfig:
 SMARTTHINGS_PAT = os.environ.get("SMARTTHINGS_PAT")
 SMARTTHINGS_DEVICE_ID = os.environ.get("SMARTTHINGS_DEVICE_ID")
 
-# Boot validation — fail fast if secrets are missing
+# OAuth credentials for the Swift JarvisACController bridge
+# These are read directly by the Swift app from its process environment.
+# They are declared here so config.py is the single source of truth for all env vars.
+ST_CLIENT_ID     = os.environ.get("ST_CLIENT_ID", "")
+ST_CLIENT_SECRET = os.environ.get("ST_CLIENT_SECRET", "")
+ST_DEVICE_ID     = os.environ.get("ST_DEVICE_ID", SMARTTHINGS_DEVICE_ID or "")
+ST_ACCESS_TOKEN  = os.environ.get("ST_ACCESS_TOKEN", "")
+ST_REFRESH_TOKEN = os.environ.get("ST_REFRESH_TOKEN", "")
+
+# Boot validation — warn if secrets are missing
 _missing = [k for k, v in {
     "SMARTTHINGS_PAT": SMARTTHINGS_PAT,
     "SMARTTHINGS_DEVICE_ID": SMARTTHINGS_DEVICE_ID,

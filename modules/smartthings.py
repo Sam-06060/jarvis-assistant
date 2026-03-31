@@ -4,17 +4,25 @@ modules/smartthings.py
 Native Python SmartThings hardware manager for Jarvis.
 Wraps the Samsung SmartThings REST API v1.
 All methods are synchronous (requests-based) to match Jarvis's architecture.
+
+Auth: reads OAuth tokens from environment variables (set via .env file).
+  ST_ACCESS_TOKEN   — current access token (expires in ~24h)
+  ST_REFRESH_TOKEN  — used to get a new access token automatically
+  ST_CLIENT_ID      — your SmartThings OAuth app client ID
+  ST_CLIENT_SECRET  — your SmartThings OAuth app client secret
+  ST_DEVICE_ID      — the Samsung AC device ID
 """
 
+import os
 import logging
 import requests
-from config import SMARTTHINGS_PAT, SMARTTHINGS_DEVICE_ID
 
 logger = logging.getLogger("jarvis.smartthings")
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
 BASE_URL = "https://api.smartthings.com/v1"
+TOKEN_URL = "https://auth-global.api.smartthings.com/oauth/token"
 DEFAULT_TIMEOUT_SECONDS = 8
 
 VALID_MODES = {"cool", "heat", "auto", "dry", "wind", "fanOnly"}
@@ -28,7 +36,7 @@ class SmartThingsError(Exception):
     pass
 
 class SmartThingsAuthError(SmartThingsError):
-    """Raised on 401/403 responses — bad or expired PAT."""
+    """Raised on 401/403 responses — bad or expired token."""
     pass
 
 class SmartThingsDeviceError(SmartThingsError):
@@ -45,36 +53,105 @@ class SmartThingsAPIError(SmartThingsError):
 class SmartThingsManager:
     """
     Controls a Samsung AC unit via the SmartThings REST API.
+    Reads credentials from environment variables automatically.
 
     Usage:
         st = SmartThingsManager()
         st.turn_on()
         st.set_temperature(22)
         st.set_mode("cool")
+        status = st.get_status()
         st.turn_off()
     """
 
     def __init__(self, pat: str = None, device_id: str = None):
-        self.pat = pat or SMARTTHINGS_PAT
-        self.device_id = device_id or SMARTTHINGS_DEVICE_ID
-        self.base_headers = {
-            "Authorization": f"Bearer {self.pat}",
-            "Content-Type": "application/json",
-        }
+        # OAuth token from env (preferred)
+        self._access_token  = os.getenv("ST_ACCESS_TOKEN", "")
+        self._refresh_token = os.getenv("ST_REFRESH_TOKEN", "")
+        self._client_id     = os.getenv("ST_CLIENT_ID", "")
+        self._client_secret = os.getenv("ST_CLIENT_SECRET", "")
+
+        # Device ID: env → explicit arg → legacy config fallback
+        self.device_id = (
+            os.getenv("ST_DEVICE_ID")
+            or device_id
+            or "ee2f1cab-7be3-3d30-895e-69af725c7291"
+        )
+
+        # Legacy PAT fallback — only used if no OAuth token is available
+        if not self._access_token and pat:
+            self._access_token = pat
+            logger.warning("[SmartThings] No ST_ACCESS_TOKEN in env — using PAT fallback.")
+
+        if not self._access_token:
+            logger.error(
+                "[SmartThings] No access token! Set ST_ACCESS_TOKEN in your .env file."
+            )
+
         self.device_url = f"{BASE_URL}/devices/{self.device_id}/commands"
-        self.status_url = f"{BASE_URL}/devices/{self.device_id}/status"
+        self.status_url = f"{BASE_URL}/devices/{self.device_id}/components/main/status"
         logger.info(
-            "[SmartThings] Manager initialised. Device: %s",
+            "[SmartThings] Manager initialised (OAuth). Device: %s",
             self.device_id[:8] + "..." if self.device_id else "UNSET",
         )
 
-    # ── Private HTTP Helpers ─────────────────────────────────────────────────
+    @property
+    def _headers(self) -> dict:
+        return {
+            "Authorization": f"Bearer {self._access_token}",
+            "Content-Type": "application/json",
+        }
+
+    def _refresh_access_token(self) -> bool:
+        """
+        Use the refresh token to get a new access token.
+        Updates self._access_token in-place.
+        Returns True on success, False on failure.
+        """
+        if not all([self._refresh_token, self._client_id, self._client_secret]):
+            logger.error(
+                "[SmartThings] Cannot refresh — missing ST_REFRESH_TOKEN, "
+                "ST_CLIENT_ID, or ST_CLIENT_SECRET in .env"
+            )
+            return False
+        try:
+            resp = requests.post(
+                TOKEN_URL,
+                data={
+                    "grant_type":    "refresh_token",
+                    "client_id":     self._client_id,
+                    "client_secret": self._client_secret,
+                    "refresh_token": self._refresh_token,
+                },
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                self._access_token  = data["access_token"]
+                self._refresh_token = data.get("refresh_token", self._refresh_token)
+                # Write back to env so the rest of the process sees fresh tokens
+                os.environ["ST_ACCESS_TOKEN"]  = self._access_token
+                os.environ["ST_REFRESH_TOKEN"] = self._refresh_token
+                
+                # Persist to .env file so the tokens survive restarts
+                try:
+                    env_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
+                    from dotenv import set_key
+                    set_key(env_path, "ST_ACCESS_TOKEN", self._access_token)
+                    set_key(env_path, "ST_REFRESH_TOKEN", self._refresh_token)
+                    logger.info("[SmartThings] ✅ Token refreshed and saved successfully.")
+                except Exception as e:
+                    logger.warning(f"[SmartThings] ✅ Token refreshed but failed to update .env on disk: {e}")
+
+                return True
+            logger.error("[SmartThings] Token refresh failed: HTTP %s - %s", resp.status_code, resp.text)
+        except Exception as e:
+            logger.error("[SmartThings] Token refresh exception: %s", e)
+        return False
 
     def _post_command(self, commands: list) -> dict:
         """
-        POST a list of SmartThings command objects to the device endpoint.
-        Returns the parsed JSON response body.
-        Raises SmartThingsError subclasses on failure.
+        POST a command. Automatically retries once after refreshing token on 401.
         """
         payload = {"commands": commands}
         logger.debug("[SmartThings] POST %s | payload: %s", self.device_url, payload)
@@ -82,19 +159,27 @@ class SmartThingsManager:
             response = requests.post(
                 self.device_url,
                 json=payload,
-                headers=self.base_headers,
+                headers=self._headers,
                 timeout=DEFAULT_TIMEOUT_SECONDS,
             )
         except requests.exceptions.Timeout:
             raise SmartThingsError(
-                f"[SmartThings] Request timed out after {DEFAULT_TIMEOUT_SECONDS}s. "
-                "Check your internet connection."
+                f"[SmartThings] Request timed out after {DEFAULT_TIMEOUT_SECONDS}s."
             )
         except requests.exceptions.ConnectionError as e:
-            raise SmartThingsError(
-                f"[SmartThings] Connection failed: {e}. "
-                "SmartThings API may be unreachable."
-            )
+            raise SmartThingsError(f"[SmartThings] Connection failed: {e}")
+
+        # Auto-refresh on 401 and retry once
+        if response.status_code == 401 and self._refresh_access_token():
+            try:
+                response = requests.post(
+                    self.device_url,
+                    json=payload,
+                    headers=self._headers,
+                    timeout=DEFAULT_TIMEOUT_SECONDS,
+                )
+            except Exception as e:
+                raise SmartThingsError(f"[SmartThings] Retry after refresh failed: {e}")
 
         self._raise_for_status(response)
         logger.info("[SmartThings] Command succeeded. HTTP %s", response.status_code)
@@ -107,17 +192,16 @@ class SmartThingsManager:
             return
         if code == 401:
             raise SmartThingsAuthError(
-                "[SmartThings] HTTP 401 — PAT is invalid or expired. "
-                "Regenerate it at https://account.smartthings.com/tokens"
+                "[SmartThings] HTTP 401 — Token invalid or expired and refresh failed. "
+                "Check ST_CLIENT_ID + ST_CLIENT_SECRET in .env"
             )
         if code == 403:
             raise SmartThingsAuthError(
-                "[SmartThings] HTTP 403 — PAT does not have permission for this device."
+                "[SmartThings] HTTP 403 — Token doesn't have permission for this device."
             )
         if code == 404:
             raise SmartThingsDeviceError(
-                f"[SmartThings] HTTP 404 — Device '{self.device_id}' not found. "
-                "Verify SMARTTHINGS_DEVICE_ID is correct."
+                f"[SmartThings] HTTP 404 — Device '{self.device_id}' not found."
             )
         if code == 429:
             raise SmartThingsAPIError(
@@ -131,22 +215,14 @@ class SmartThingsManager:
 
     def get_status(self) -> dict:
         """
-        Fetch and return the full device status dict from SmartThings.
-        Useful for verification scripts and debug logging.
-        Returns a dict like:
-            {
-              "switch": "on",
-              "temperature": 24,
-              "coolingSetpoint": 22,
-              "airConditionerMode": "cool",
-              "fanMode": "auto"
-            }
+        Fetch and return a flat device status dict.
+        Returns: {"switch", "temperature", "coolingSetpoint", "airConditionerMode"}
         """
         logger.debug("[SmartThings] GET device status: %s", self.status_url)
         try:
             response = requests.get(
                 self.status_url,
-                headers=self.base_headers,
+                headers=self._headers,
                 timeout=DEFAULT_TIMEOUT_SECONDS,
             )
         except requests.exceptions.Timeout:
@@ -154,19 +230,18 @@ class SmartThingsManager:
         except requests.exceptions.ConnectionError as e:
             raise SmartThingsError(f"[SmartThings] Connection failed: {e}")
 
-        self._raise_for_status(response)
-        raw = response.json()
+        if response.status_code == 401 and self._refresh_access_token():
+            response = requests.get(self.status_url, headers=self._headers,
+                                    timeout=DEFAULT_TIMEOUT_SECONDS)
 
-        # Parse the nested SmartThings status structure into a flat dict
-        components = raw.get("components", {}).get("main", {})
+        self._raise_for_status(response)
+        raw = response.json()  # /components/main/status returns the main component directly
         status = {
-            "switch": components.get("switch", {}).get("switch", {}).get("value", "unknown"),
-            "temperature": components.get("temperatureMeasurement", {})
-                                      .get("temperature", {}).get("value"),
-            "coolingSetpoint": components.get("thermostatCoolingSetpoint", {})
-                                          .get("coolingSetpoint", {}).get("value"),
-            "airConditionerMode": components.get("airConditionerMode", {})
-                                             .get("airConditionerMode", {}).get("value"),
+            "switch":              raw.get("switch", {}).get("switch", {}).get("value", "unknown"),
+            "temperature":         raw.get("temperatureMeasurement", {}).get("temperature", {}).get("value"),
+            "coolingSetpoint":     raw.get("thermostatCoolingSetpoint", {}).get("coolingSetpoint", {}).get("value"),
+            "airConditionerMode":  raw.get("airConditionerMode", {}).get("airConditionerMode", {}).get("value"),
+            "fanMode":             raw.get("airConditionerFanMode", {}).get("fanMode", {}).get("value"),
         }
         logger.info("[SmartThings] Status: %s", status)
         return status

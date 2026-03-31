@@ -138,9 +138,7 @@ class JarvisSocketServer:
     def broadcast(self, header, detail):
         """Send a HUD update to all connected clients"""
         msg_type = "hud_update"
-        data_field = None
         
-        # Check standard broadcast format
         try:
             msg = json.dumps({
                 "type": msg_type,
@@ -161,6 +159,42 @@ class JarvisSocketServer:
                         self.clients.remove(disc)
         except Exception as e:
             print(f"Broadcast Error: {e}")
+
+    def broadcast_signal(self, signal: str):
+        """
+        Send an __AC_*__ hardware command signal to all connected Swift clients.
+        The Swift SocketClient intercepts messages whose 'data' field starts with '__AC_'
+        and dispatches them to JarvisACController.
+
+        Protocol examples:
+            broadcast_signal("__AC_ON__")
+            broadcast_signal("__AC_OFF__")
+            broadcast_signal("__AC_TEMP_22__")
+            broadcast_signal("__AC_MODE_cool__")
+        """
+        try:
+            msg = json.dumps({
+                "type": "command",
+                "header": "AC_SIGNAL",
+                "detail": signal,
+                "data": signal
+            }) + "\n"
+
+            with self.lock:
+                disconnected = []
+                for client in self.clients:
+                    try:
+                        client.sendall(msg.encode('utf-8'))
+                    except:
+                        disconnected.append(client)
+
+                for disc in disconnected:
+                    if disc in self.clients:
+                        self.clients.remove(disc)
+
+            print(f"📡 [SocketServer] AC signal broadcasted: {signal}")
+        except Exception as e:
+            print(f"Signal Broadcast Error: {e}")
 
     def stop(self):
         self.running = False
