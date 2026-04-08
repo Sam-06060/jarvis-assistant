@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ============== AUDIO I/O SETTINGS ==============
-FORCE_MAC_BUILTIN_AUDIO = False
+FORCE_MAC_BUILTIN_AUDIO = True
 
 # Assistant Configuration
 ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Jarvis")
@@ -200,7 +200,7 @@ AGENTIC_LLM_PROVIDER = os.getenv("AGENTIC_LLM_PROVIDER", "groq")
 AGENTIC_LLM_MODEL = os.getenv("AGENTIC_LLM_MODEL", "llama-3.3-70b-versatile")
 
 # ============== AGENTIC MODE (Modular/Toggleable) ==============
-ENABLE_AGENTIC_MODE = True
+ENABLE_AGENTIC_MODE = False
 AGENTIC_MAX_ITERATIONS = 30  # Max steps in a single ReAct loop
 AGENTIC_TIMEOUT_SECONDS = 30 # Bounds: 5-120
 TOOL_CALL_MAX_RETRIES = 2    # Bounds: 0-5
