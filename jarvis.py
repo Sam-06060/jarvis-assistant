@@ -25,18 +25,27 @@ import config
 from core.registry import ServiceRegistry
 from core.events import EventManager
 
-# --- WARP SPEED PRE-WARM (Phase 10: Nuclear Startup) ---
-# Start background imports for the heaviest libraries at T+0ms
+# --- WARP SPEED PRE-WARM (Phase 11: Agentic Instant-Online) ---
 def _warp_speed_prewarm():
-    try:
-        # Pre-warm PyObjC (Foundation, Speech, AVFoundation)
-        import Foundation, Speech, AVFoundation
-        # Pre-warm heavy data/ai libs
-        import pandas, requests, yfinance, sklearn
-        # Pre-warm core brain
-        from modules.brain import AIBrain
-        logger.debug("⚡ Warp Speed Pre-warm: Heavy modules heated")
-    except Exception: pass
+    """Nuclear Startup: Pre-heats heavy modules in background at T+0ms."""
+    modules_to_warm = [
+        # Core UI/System
+        "Foundation", "Speech", "AVFoundation",
+        # Heavy data/logic
+        "requests", "yfinance", "sklearn", "numpy", "pandas",
+        # Agentic Engine Stack
+        "modules.brain", "modules.agent_core", "modules.planner", "modules.semantic_router",
+        # Third-party AI
+        "fastembed"
+    ]
+    for mod in modules_to_warm:
+        try:
+            __import__(mod)
+            logger.debug(f"⚡ Warp Speed: {mod} heated")
+        except ImportError:
+            logger.debug(f"ℹ️ Warp Speed: {mod} skipped (not installed)")
+        except Exception as e:
+            logger.debug(f"ℹ️ Warp Speed: {mod} error: {e}")
 
 threading.Thread(target=_warp_speed_prewarm, daemon=True, name="WarpSpeed-Prewarm").start()
 
@@ -125,10 +134,14 @@ class JarvisApp:
                 si = SystemInfo(); ServiceRegistry.register("system", si); _sys_info[0] = si
             def init_faceid_bg():
                 if getattr(config, "ENABLE_FACE_ID", True):
-                    from modules.security import FaceID
-                    fid = FaceID(reference_image_path="data/me.jpg", hud_queue=self.hud_queue)
-                    ServiceRegistry.register("face_id", fid)
-            
+                    try:
+                        from modules.security import FaceID
+                        fid = FaceID(reference_image_path="data/me.jpg", hud_queue=self.hud_queue)
+                        ServiceRegistry.register("face_id", fid)
+                        logger.info("🔒 FaceID System Loaded (background)")
+                    except Exception as e:
+                        logger.warning(f"⚠️ FaceID Init failed: {e}")
+
             # --- WAVE 1: CORE PARALLEL (Critical for Interaction) ---
             with ThreadPoolExecutor(max_workers=10, thread_name_prefix="JarvisWarp") as pool:
                 # Essential for T-0 Interaction
@@ -155,26 +168,43 @@ class JarvisApp:
                 # Background these heavily
                 pool.submit(init_brain_late)
                 pool.submit(init_commander_late)
-                pool.submit(init_faceid_bg)
                 
-                # Wait ONLY for Core logic to be ready
+                # FaceID: decoupled background startup (Not blocking Core Ready)
+                threading.Thread(target=init_faceid_bg, daemon=True, name="FaceID-Warp").start()
+                
+                # Wait ONLY for Core logic to be ready (Interaction Ready)
                 from concurrent.futures import wait
                 wait(core_futs)
-
-            # --- PHASE C: Secondary Background ---
-            self._init_optional_modules()
-            
-            def init_memory_bg():
-                from modules.memory_manager import MemoryManager
-                memory_mgr = MemoryManager(history_component=_history[0], knowledge_file="data/knowledge.json")
-                ServiceRegistry.register("memory", memory_mgr)
-            threading.Thread(target=init_memory_bg, daemon=True, name="MemoryInit").start()
-
-            # Initialize Agentic Mode based on config
-            if getattr(config, "ENABLE_AGENTIC_MODE", False):
-                self._toggle_agent(True, silent=True)
                 
-            logger.info(f"⏱️ TOTAL INIT: {time.time()-t_start:.2f}s")
+            # Secondary Background Chain (Brain, Commander, Agentic, etc.)
+            def init_secondary_bg():
+                # Start WAVE 2 inside pool if not already
+                # Actually WAVE 2 was already submitted to pool above.
+                pass
+            
+            logger.info(f"⏱️ TOTAL INIT (Core): {time.time()-t_start:.2f}s")
+
+            # Move Phase C & Agentic to a separate background cycle to keep Boot Time < 10s
+            def finish_init_bg():
+                try:
+                    # --- PHASE C: Secondary Background ---
+                    self._init_optional_modules()
+                    
+                    def init_memory_bg():
+                        from modules.memory_manager import MemoryManager
+                        # Wait for history
+                        while not _history[0]: time.sleep(0.01)
+                        memory_mgr = MemoryManager(history_component=_history[0], knowledge_file="data/knowledge.json")
+                        ServiceRegistry.register("memory", memory_mgr)
+                    threading.Thread(target=init_memory_bg, daemon=True, name="MemoryInit").start()
+
+                    # Initialize Agentic Mode in background
+                    if getattr(config, "ENABLE_AGENTIC_MODE", False):
+                        self._toggle_agent(True, silent=True)
+                except Exception as e:
+                    logger.error(f"⚠️ Secondary initialization failed: {e}")
+
+            threading.Thread(target=finish_init_bg, daemon=True, name="SecondaryInit").start()
         except Exception as e:
             logger.critical(f"❌ FATAL INITIALIZATION ERROR: {e}", exc_info=True)
             self._update_hud("ERROR", "Startup Failed")
@@ -248,6 +278,23 @@ class JarvisApp:
         ServiceRegistry.register("socket_server", self.api_server)
         self._wrap_hud_queue_for_sockets()
         logger.info(f"⏱️ Socket server ready: {time.time()-t_boot:.2f}s")
+        
+        # --- NUCLEAR STARTUP: SIGNAL READINESS IMMEDIATELY ---
+        # We signal online as soon as the socket is ready to accept UI connections.
+        # Background loading continues for heavy sub-systems.
+        self._update_hud("IDLE", "Online")
+        logger.info(f"⏱️ ═══ TOTAL BOOT TIME: {time.time()-t_boot:.2f}s ═══")
+
+        # 2. Early Semantic Boot (Start Indexing in Background)
+        def _early_semantic_boot():
+            try:
+                from modules.semantic_router import SemanticRouter
+                _registry_path = os.path.join(config.ROOT_DIR, "modules", "agent_skills", "_registry.json")
+                SemanticRouter.instance().boot(_registry_path)
+            except Exception as e:
+                logger.warning(f"⚠️ Early SemanticRouter boot failed: {e}")
+        
+        threading.Thread(target=_early_semantic_boot, daemon=True, name="EarlySemanticBoot").start()
 
         # 2. Register PlanMode (needs early socket routing)
         try:
@@ -271,25 +318,28 @@ class JarvisApp:
             if reminders: reminders.start_background_check()
             self._setup_hotkeys()
 
-            # Finalize Online Status
-            speech = ServiceRegistry.get("speech")
-            if speech:
+            # Finalize Online Status (Speech feedback when ready)
+            def announce_online():
+                while not ServiceRegistry.get("speech"): time.sleep(0.1)
+                speech = ServiceRegistry.get("speech")
                 speech.play_wake_sound()
                 speech.speak("All systems online.")
+            threading.Thread(target=announce_online, daemon=True, name="OnlineAnnouncer").start()
             
             # Proactive Sync
             status = "ON" if self.agent is not None else "OFF"
             self._update_hud("SYSTEM", f"Agentic Mode: {status}")
             self._update_hud("IDLE", "Online")
-            logger.info(f"⏱️ ═══ TOTAL BOOT TIME: {time.time()-t_boot:.2f}s ═══")
 
         threading.Thread(target=_execute_boot_chain, daemon=True, name="BootChain").start()
 
         # 7. EVENT LOOP
         while self.is_running:
             try:
-                # Readiness Guard: Don't process loops until core interaction is ready
-                if not ServiceRegistry.get("speech"):
+                # Readiness Guard: Don't process loops until core interaction systems are ready
+                # Prevents AttributeError: 'NoneType' object has no attribute 'process'
+                core_keys = ["speech", "commander", "brain"]
+                if not all(ServiceRegistry.get(k) for k in core_keys):
                     time.sleep(0.1)
                     continue
                     

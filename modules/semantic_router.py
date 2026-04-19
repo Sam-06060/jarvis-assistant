@@ -21,6 +21,12 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
+# --- WARP-SPEED IMPORTS ---
+try:
+    from fastembed import TextEmbedding
+except ImportError:
+    TextEmbedding = None
+
 logger = logging.getLogger(__name__)
 
 _CACHE_FILE = os.path.join(
@@ -211,13 +217,14 @@ class SemanticRouter:
         """Lazy-load the fastembed model (downloads ~30MB ONNX file on first use)."""
         if self._model is not None:
             return
+        if TextEmbedding is None:
+            raise RuntimeError("FastEmbed library not found. Install it for semantic routing.")
         try:
-            from fastembed import TextEmbedding
             logger.info(f"📦 [SemanticRouter] Loading model: {_MODEL_NAME}")
             self._model = TextEmbedding(model_name=_MODEL_NAME)
             logger.info("✅ [SemanticRouter] Model loaded.")
         except Exception as e:
-            raise RuntimeError(f"Failed to load fastembed model: {e}")
+            raise RuntimeError(f"Failed to initialize fastembed model: {e}")
 
     def _embed(self, texts: List[str]) -> np.ndarray:
         """Generate embeddings for a list of texts. Returns numpy array."""

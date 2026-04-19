@@ -21,6 +21,14 @@ import config
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Callable, Set
 
+# --- WARP-SPEED IMPORTS ---
+from modules.token_budget import TokenBudget
+from modules.context_compressor import ContextCompressor
+from modules.observation_assessor import ObservationAssessor
+from modules.heartbeat import HeartbeatEmitter
+from modules.planner import TaskPlanner
+from modules.semantic_router import SemanticRouter
+
 logger = logging.getLogger(__name__)
 
 
@@ -190,16 +198,12 @@ class AgentCore:
         provider = getattr(config, "llm_provider", None) or getattr(
             __import__("config"), "AGENTIC_LLM_PROVIDER", "groq"
         )
-        from modules.token_budget import TokenBudget
-        from modules.context_compressor import ContextCompressor
-        from modules.observation_assessor import ObservationAssessor
         self.token_budget = TokenBudget(provider=provider)
         self.compressor = ContextCompressor(brain=self.brain)
         self.assessor = ObservationAssessor()
         self.task_id: str = ""
 
         # Heartbeat emitter (real-time status to Swift UI)
-        from modules.heartbeat import HeartbeatEmitter
         socket_server = registry.get("socket_server")
         self.heartbeat = HeartbeatEmitter(
             hud_queue=self.hud,
@@ -208,7 +212,6 @@ class AgentCore:
 
         # Phase 4: TaskPlanner
         try:
-            from modules.planner import TaskPlanner
             skill_registry = registry.get("skill_registry")
             self.planner = TaskPlanner(brain=self.brain, skill_registry=skill_registry)
         except Exception as _pe:
@@ -217,9 +220,7 @@ class AgentCore:
 
         # Phase 5: Semantic Router — non-blocking background boot
         try:
-            import os
             import config as global_config
-            from modules.semantic_router import SemanticRouter
             _registry_path = os.path.join(global_config.ROOT_DIR, "modules", "agent_skills", "_registry.json")
             SemanticRouter.instance().boot(_registry_path)
         except Exception as _se:
@@ -241,12 +242,13 @@ class AgentCore:
             "good", "great", "hi", "hello", "bye", "stop", "exit",
         }
         task_stripped = task.strip().lower().rstrip(".,!?")
-        # ── Step 0: Goal ──────────────────────────────────────────
-        self.heartbeat.step_start(f"Goal: {task[:60]}...")
         
-        # Fast path: obvious live quote/rate lookups should feel Siri-like.
+        # ── Fast Path 1: Conversational / Greetings ──────────────────────────
+        if task_stripped in _CONVERSATIONAL or (len(task_stripped.split()) < 3 and not any(k in task_stripped for k in ["price", "market", "quote", "btc", "stock"])):
+            logger.info(f"💬 Conversational Guard: handling '{task_stripped}' as direct chat.")
+            return self.brain.ask(f"The user said '{task}'. Provide a short, polite, helpful response as JARVIS. No tools needed.")
 
-        # ── Plan Mode trigger ──────────────────────────────────────────────────
+        # ── Fast Path 2: Plan Mode trigger ────────────────────────────────────
         # Activated by "__PLAN_MODE__" prefix (sent by Swift Plan button) or
         # by natural phrasing like "make a plan for..." / "plan out..."
         _PLAN_TRIGGERS = {"__PLAN_MODE__", "make a plan", "plan out", "create a plan", "write a plan"}
@@ -258,11 +260,17 @@ class AgentCore:
             actual_task = task.replace("__PLAN_MODE__", "").strip() or task
             return self._run_plan_mode(actual_task)
 
-        # Fast path: obvious live quote/rate lookups should feel Siri-like.
-        # They do not need sandbox setup, playbooks, or a ReAct loop.
+        # ── Fast Path 2: Direct Market Data ───────────────────────────────────
+        # Obvious live quote/rate lookups should feel Siri-like and not trigger the agent loop.
         direct_market_result = self._try_direct_market_data_task(task)
         if direct_market_result:
             return direct_market_result
+
+        # ── Step 0: Goal ──────────────────────────────────────────────────────
+        # Only show Agentic Mode signals if we've passed all fast-paths
+        self.heartbeat.header("🤖 Entering Agentic Mode")
+        self.heartbeat.step_start(f"Goal: {task[:60]}...")
+        self.heartbeat.emit("🧠 Initializing intelligence stack...", index=HeartbeatEmitter.ACTION)
 
         # ── Reset per-task state ──────────────────────────────────────────
         self.token_budget.reset()
@@ -286,6 +294,10 @@ class AgentCore:
 
         iterations = 0
         task_start_time = time.time()
+
+        # ── Phase 4: Pronoun Resolution ────────────────────────────────────
+        task = self._resolve_task_pronouns(task)
+
         self.task_id = str(uuid.uuid4())
         session = SessionState()  # ← NEW: per-task session state
 
@@ -647,7 +659,10 @@ class AgentCore:
                     memory.set_step_output(self.task_id, iterations, obs_result)
 
                 # ── STEP PROGRESSION ──────────────────────────────────────
-                _META_TOOLS = {"remember_fact", "save_info", "retrieve_fact", "search_awesome_skills", "fetch_skill_playbook", "search_contact"}
+                # Phase 5: Only pure bookkeeping tools skip step advancement.
+                # search_awesome_skills / fetch_skill_playbook / search_contact
+                # MUST advance the step counter when the plan assigns them as primary tools.
+                _META_TOOLS = {"remember_fact", "save_info", "retrieve_fact"}
 
                 if plan and plan.steps:
                     step_attempts[current_step_index] = step_attempts.get(current_step_index, 0) + 1
@@ -801,14 +816,28 @@ class AgentCore:
 
     def _try_direct_market_data_task(self, task: str) -> Optional[str]:
         """
-        Direct path for obvious live quote/rate requests.
-        This avoids a full agent loop for tasks like:
-          "current gold price"
-          "email me the live gold price"
+        FAST PATH: handles ONLY pure live-quote requests.
+        Two eligible forms:
+          1. Pure data: "what's the gold price?" → reply immediately
+          2. Data + email only: "email me the gold price" → get + send_email
+
+        For tasks that also want file-saving ("save to ...", "write to ..."),
+        we MUST return None so the full ReAct loop handles the whole chain.
+        These tasks need get_market_data + write_file + send_email coordinated
+        across 3 tool calls — the fast path can't do that cleanly.
         """
         if not self._is_simple_market_data_task(task):
             return None
 
+        text = task.lower()
+
+        # ── Guard: if the task wants a file written, fall through to full loop ──
+        file_signals = ("save", "write", ".md", ".txt", ".csv", ".json", "file", "desktop")
+        if any(sig in text for sig in file_signals):
+            logger.debug("⚡ Fast-path skipped: task includes file-save — full ReAct loop needed.")
+            return None
+
+        # ── Fetch the market data ──
         try:
             from modules.live_data_service import LiveDataService
             result = LiveDataService.resolve_market_data(task)
@@ -819,34 +848,32 @@ class AgentCore:
         if not result:
             return None
 
-        text = task.lower()
+        # ── Pure data request — return immediately ──
         wants_email = any(k in text for k in ("email", "mail"))
         if not wants_email:
             logger.info("⚡ Direct market-data fast path satisfied task.")
             return result
 
+        # ── Data + email request ──
         commander = self.registry.get("commander")
-        # 🔗 Senior Developer Fix: Check Unified Registry if commander background tool loading is in-progress
-        skill_registry = self.registry.get("skill_registry")
-        email_tool_available = (
-            "send_email" in getattr(commander, "tools", {}) 
-            or (skill_registry and skill_registry.get_by_id("send_email"))
-        )
+        email_tool_available = "send_email" in getattr(commander, "tools", {})
 
-        if not commander or not hasattr(commander, "execute_tool") or not email_tool_available:
-            return f"{result}\n\nI found the live data, but the email tool is not available right now."
+        if not commander or not email_tool_available:
+            # Don't return a dead-end message — fall through to the full agent loop
+            # so it can try alternative paths (e.g. compose email differently)
+            logger.warning("⚡ Fast-path: email tool unavailable — falling through to ReAct loop.")
+            return None
 
         subject = self._market_email_subject(task)
-        body = result
         payload = {
-            "to": getattr(config, "USER_EMAIL", "samson06060@gmail.com"),
-            "recipient": getattr(config, "USER_EMAIL", "samson06060@gmail.com"),
+            "to": getattr(config, "USER_EMAIL", ""),
             "subject": subject,
-            "body": body,
+            "body": result,
         }
         email_result = commander.execute_tool("send_email", payload)
-        logger.info("⚡ Direct market-data email path completed.")
+        logger.info("⚡ Direct market-data + email fast path completed.")
         return f"{result}\n\nEmail status: {email_result}"
+
 
     def _is_simple_market_data_task(self, task: str) -> bool:
         try:
@@ -856,14 +883,18 @@ class AgentCore:
         except Exception:
             return False
 
+        # TOOL-FIRST TRIAGE: Direct path if the task is a clear data lookup
+        from modules.live_data_service import LiveDataService
         text = task.lower()
-        complex_terms = [
-            "compare", "analyze", "analyse", "research", "report", "forecast",
-            "trend", "historical", "history", "chart", "graph", "portfolio",
-            "backtest", "strategy", "why", "explain", "deep dive", "top ",
-            "best ", "volatility", "moving average",
-        ]
-        return not any(term in text for term in complex_terms)
+        if LiveDataService.is_market_data_query(task):
+            # Block deep-dive terms but allow simple ones
+            complex_terms = [
+                "compare", "forecast", "trend", "historical", "history", 
+                "chart", "graph", "portfolio", "backtest", "strategy", 
+                "why", "deep dive", "volatility",
+            ]
+            return not any(term in text for term in complex_terms)
+        return False
 
     def _market_email_subject(self, task: str) -> str:
         text = task.lower()
@@ -876,9 +907,39 @@ class AgentCore:
         return "Current market quote"
 
     def _should_block_playbook_for_task(self, task: str, action: Optional[str]) -> bool:
+        """Block playbook searches for ANY task that is fully served by direct tools."""
         if action not in {"search_awesome_skills", "fetch_skill_playbook"}:
             return False
-        return self._is_simple_market_data_task(task) and not self._task_needs_playbook(task)
+
+        # If the task genuinely needs a playbook, never block
+        if self._task_needs_playbook(task):
+            return False
+
+        text = task.lower()
+        # Direct-tool signal groups — each maps 1:1 to a registered tool
+        direct_tool_signals = [
+            # Market data
+            "gold", "silver", "bitcoin", "btc", "ethereum", "eth", "stock", "price",
+            "market", "crypto", "forex", "exchange rate", "commodity",
+            # Communication
+            "email", "mail", "send", "message", "whatsapp",
+            # Weather / Time / System
+            "weather", "temperature", "forecast", "time", "date", "clock",
+            "battery", "volume", "brightness",
+            # Reminders
+            "remind", "reminder", "alarm", "timer",
+            # Music
+            "play", "music", "song", "spotify", "pause", "resume",
+            # Utilities
+            "calculate", "math", "translate",
+            # Simple file saves (combined with above signals)
+            "save", "write to file",
+        ]
+        if any(sig in text for sig in direct_tool_signals):
+            return True
+
+        # Market data always blocks playbooks
+        return self._is_simple_market_data_task(task)
 
     def _should_block_shell_for_simple_market_data(self, task: str) -> bool:
         return self._is_simple_market_data_task(task)
@@ -1014,6 +1075,39 @@ class AgentCore:
     # System Prompt
     # ──────────────────────────────────────────────────────────────────────
 
+    def _resolve_task_pronouns(self, task: str) -> str:
+        """
+        Pre-process a task string to resolve implicit references BEFORE planning.
+        This prevents the agent from needing to research 'who is me' or 'where is my desktop'.
+        """
+        import re as _re
+        text = task
+
+        # Resolve "my desktop" → ~/Desktop
+        home = os.path.expanduser("~")
+        text = _re.sub(r"\bmy desktop\b", f"{home}/Desktop", text, flags=_re.IGNORECASE)
+
+        # Resolve self-referential email recipients:
+        # "email it to me", "send to me", "mail me the results", etc.
+        user_email = getattr(config, "USER_EMAIL", "") if config else ""
+        if user_email:
+            # "email/send/mail ... to me/myself"
+            text = _re.sub(
+                r"\bto\s+(me|myself|the user)\b",
+                f"to {user_email}",
+                text, flags=_re.IGNORECASE
+            )
+            # "email me the ..."
+            text = _re.sub(
+                r"\b(email|mail|send)\s+me\b",
+                f"\\1 {user_email}",
+                text, flags=_re.IGNORECASE
+            )
+
+        if text != task:
+            logger.info(f"🔤 Pronoun resolution: '{task[:60]}...' → '{text[:60]}...'")
+        return text
+
     def _build_system_prompt(self, context: str, task: str = "") -> str:
         """
         Build agent system prompt. Uses commander.tools as the SINGLE source of truth
@@ -1054,7 +1148,7 @@ class AgentCore:
 
             preferred_ids = self._preferred_tools_for_task(task, raw_tools)
             suppressed_ids = set()
-            if self._is_simple_market_data_task(task):
+            if self._is_simple_market_data_task(task) or not self._task_needs_playbook(task):
                 suppressed_ids = {"search_awesome_skills", "fetch_skill_playbook", "run_command"}
             ordered_ids = preferred_ids + [
                 tid for tid in ordered_ids
@@ -1067,80 +1161,75 @@ class AgentCore:
                 for tid in top_12
                 if tid in raw_tools and hasattr(raw_tools[tid], "description")
             ]
-            for meta_tool in ("search_awesome_skills", "fetch_skill_playbook"):
-                if (
-                    self._task_needs_playbook(task)
-                    and meta_tool in raw_tools
-                    and f"- {meta_tool}:" not in "\n".join(lines)
-                ):
-                    lines.append(f"- {meta_tool}: {raw_tools[meta_tool].description}")
+            # Only surface playbook tools if the task genuinely needs them
+            if self._task_needs_playbook(task):
+                for meta_tool in ("search_awesome_skills", "fetch_skill_playbook"):
+                    if (
+                        meta_tool in raw_tools
+                        and f"- {meta_tool}:" not in "\n".join(lines)
+                    ):
+                        lines.append(f"- {meta_tool}: {raw_tools[meta_tool].description}")
             tools_desc = "\n".join(lines)
 
-        return f"""You are JARVIS, an autonomous agentic assistant.
-You solve complex multi-step tasks using a ReAct (Reasoning + Action) loop.
+        # Determine if playbooks should be advertised at all for this task
+        needs_playbook = self._task_needs_playbook(task)
+        playbook_block = (
+            "### EXPERT PLAYBOOKS\n"
+            "- Use `search_awesome_skills` when the task needs specialized strategy with NO direct tool.\n"
+            "- Use `fetch_skill_playbook` only after finding a highly relevant skill ID.\n"
+        ) if needs_playbook else (
+            "### PLAYBOOK GATE\n"
+            "- Do NOT use `search_awesome_skills` or `fetch_skill_playbook` for this task.\n"
+            "- Direct tools handle everything. Use them."
+        )
+
+        user_email = getattr(config, "USER_EMAIL", "") if config else ""
+        user_name  = getattr(config, "USER_NAME",  "Sir") if config else "Sir"
+
+        return f"""You are JARVIS, an autonomous agentic assistant operating in Zero-Waste mode.
+Your mandate: complete tasks with the FEWEST tool calls possible, using ONLY the listed tools.
 
 System Context:
 {context}
 
-Available Tools (top-12 most relevant for this task):
+User Identity:
+- Name: {user_name}
+- Email: {user_email} ← When the user says 'me', 'myself', 'my email', THIS is the address.
+- Desktop: {os.path.expanduser('~/Desktop')} ← When the user says 'my desktop', THIS is the path.
+
+Available Tools (most relevant first):
 {tools_desc}
 
-### EXPERT PLAYBOOKS (MCP SYSTEM)
-You have access to 2,200+ specialized expert skills.
-- Use `search_awesome_skills` only when the task genuinely needs specialized expert strategy.
-- Use `fetch_skill_playbook` only after a highly relevant skill ID was found.
-- Skip playbooks for simple lookups, live market prices, weather, time, math, basic web search, and sending known content.
-- For live/current stocks, crypto, commodities, gold/silver/oil, or FX/currency rates, use `get_market_data` if it is listed.
+{playbook_block}
 
-Strict Format:
-Thought: I must first break down the user's request into a checklist.
+Strict Output Format:
+Thought: Break the request into a checklist of concrete deliverables.
 Checklist:
-- [ ] Task 1
-- [ ] Task 2
-Reasoning: I will now execute Task 1.
+- [ ] Deliverable 1
+- [ ] Deliverable 2
+Reasoning: Execute step 1 now.
 Action: tool_name
 Action Input: {{ "param": "value" }}
 --- OR ---
-Thought: I have completed all items in my checklist.
+Thought: All items complete.
 Checklist:
-- [x] Task 1
-- [x] Task 2
-Reasoning: Every part of the request is satisfied. I am ready to provide the final answer.
-Final Answer: ...
+- [x] Deliverable 1
+- [x] Deliverable 2
+Final Answer: <full response with all retrieved data>
 
-Rules:
-1. **CHECKLIST**: Use [ ] (pending) and [x] (completed) in Thought. Mark steps [x] as you complete them.
-2. **ADVANCE**: After each successful tool call (GOOD observation), mark that checklist item [x] and move to the NEXT item immediately.
-3. **NO-HALFS**: Final Answer only when ALL items are [x].
-4. **URL vs SEARCH**: `web_search` takes ONLY plain keyword queries. NEVER pass a URL — URLs go to `fetch_url`.
-5. **ONE SEARCH PER STEP**: One successful web_search per checklist item is enough. Once you get GOOD results, STOP searching.
-6. **DATA SUFFICIENCY**: If an Observation has 5+ lines of relevant text, you HAVE the data. Do NOT search again.
-7. **NO-HALLUCINATION**: Use ONLY listed tools by EXACT name. Do not invent tool names.
-8. **NO-LOOP**: If the same tool+input appears twice in history, do NOT call it again. The system will block duplicates.
-9. **STRICT JSON**: 'Action Input' MUST be valid JSON with double-quoted keys and string values.
-10. **DATA INCLUSION**: Final Answer MUST include actual retrieved data, not a summary of what you searched for.
-11. **GRACEFUL FAILURE**: If an execution tool fails (like file-not-found) but you have checked reasonable alternative paths, do NOT loop or hallucinate fictional tools. STOP and inform the user immediately. Do NOT create dummy files.
-12. **STEP ORDER**: Complete steps in order. Don't skip to Final Answer until all checklist items are [x].
-13. **OUTPUT VERIFICATION**: If a step requires creating a file or folder, you MUST verify its existence (using `ls` or `run_command`) in your Thought process BEFORE claiming the step is done.
-14. **PLATFORM PRAGMATISM**: Choose the simplest, most reliable technology for the target (e.g., HTML5/JS for Web). Avoid heavy desktop engines unless the task specifically demands native software.
-15. **CODE EXECUTION**: If you write code for analysis or a game, you MUST execute it in the sandbox to verify syntax/logic before summarizing or saving.
-16. **NO GHOST COMPLETION**: You MUST call creation tools to produce files. Claiming completion without tools is a CRITICAL FAILURE.
-17. **NO PLACEHOLDERS**: Never invent data. If a tool fails, state it clearly.
-18. **FORMATTING**: Raw text output MUST be in a code block (```text ... ```) for proper rendering.
-19. **NO INTERACTIVE INPUTS**: NEVER use `input()` in scripts. Pass variables via `sys.argv`.
-20. **SEARCH QUALITY**: If looking for live data, reject stale results.
-21. **ANTI-STALL**: If you receive a [LOOP WARNING], you MUST pivot your strategy immediately.
-22. **NO DUPLICATION**: Work in a single sandbox directory. Overwrite in-place.
-23. **SINGLE OUTPUT**: ONE project directory. Remove old files before writing new ones.
-24. **ERROR LEARNING**: If a command failed, your next attempt MUST address the specific error.
-25. **PURE INFORMATION MODE**: For informational queries, answer directly. Do NOT create files.
-26. **FILE EXISTENCE CHECK**: Before running a user file, check Desktop first. If not found, INFORM THE USER AND STOP. NEVER create dummy files or loop infinitely.
-27. **RETRY RULES**: Max 3 retries per step. Each retry MUST use a different approach.
-28. **SESSION STATE**: The system tracks all previous tool calls. Duplicate calls are blocked.
-29. **SIMPLE DATA ROUTING**: Do not use `run_command` for simple live data.
-30. **SMART PRONOUN RESOLUTION**: If the user refers to "this", "it", etc., resolve against RECENT CONVERSATION history.
-31. **SANDBOX PIPELINE**: Always develop in the sandbox first (Write → Test → Verify) before deploying to the user's Desktop.
+Core Rules:
+1. **TOOL FIRST**: If a tool exists for the action, USE IT directly. Never write code when send_email, get_market_data, write_file, etc. handle it.
+2. **PRONOUN RESOLUTION**: 'me'/'myself'/'my email' = {user_email}. 'my desktop' = {os.path.expanduser('~/Desktop')}. Resolve before acting.
+3. **ONE CALL PER DELIVERABLE**: get_market_data → done. send_email → done. write_file → done. No verification loops.
+4. **ADVANCE IMMEDIATELY**: After a GOOD tool result, mark item [x] and move to the NEXT item. Never re-check.
+5. **NO RESEARCH STEPS**: Never add 'identify methodology', 'configure X', 'verify cross-source' steps. These are hallucinated.
+6. **NO SANDBOX FOR SIMPLE TASKS**: run_command is for code generation/testing ONLY. Never use it to send email or fetch data.
+7. **NO-LOOP**: If the same tool+input appears twice in history, do NOT call it again.
+8. **STRICT JSON**: Action Input MUST be valid JSON with double-quoted keys.
+9. **GRACEFUL FAILURE**: If a tool fails after 2 attempts with different approaches, stop and inform the user clearly.
+10. **DATA INCLUSION**: Final Answer MUST include the actual retrieved data, not just a summary.
 """
+
 
     # ──────────────────────────────────────────────────────────────────────
     # Iteration Prompt
@@ -1208,11 +1297,6 @@ Rules:
             directive = f"User Task: {task}{extra_constraints}{error_context}{sandbox_note}{state_block}"
 
         return f"{directive}\n\nHistory:\n{history_text}\n\nNext Step:"
-
-    # ──────────────────────────────────────────────────────────────────────
-    # Response Parser
-    # ──────────────────────────────────────────────────────────────────────
-
     def _parse_response(self, text: str) -> Thought:
         # Pre-process: neutralise non-standard outputs
         _fake_action = re.search(r"Action:\s*(None|Finish|Done|Complete|N/A|null)\b", text, re.IGNORECASE)

@@ -60,12 +60,6 @@
             "type": "python",
             "class_name": "FetchSkillPlaybookTool"
         },
-        "send_email": {
-            "path": "/Users/samsonganta/Desktop/jarvis-assistant/modules/agent_skills/skill_bridge_tools.py",
-            "description": "Send an email to a recipient. Input: {'to': str (email address or contact name), 'subject': str, 'body': str}.",
-            "type": "python",
-            "class_name": "SendEmailTool"
-        },
         "search_contact": {
             "path": "/Users/samsonganta/Desktop/jarvis-assistant/modules/agent_skills/communication_tools.py",
             "description": "Search for a contact's email or phone by name. Input: {'name': str}",
@@ -185,6 +179,12 @@
             "description": "Send a message to a contact. For WhatsApp use 'send_whatsapp' tool instead \u2014 it is more reliable. Use this only for iMessage. Input: {'contact': str, 'message': str, 'platform': 'whatsapp'|'imessage'}.",
             "type": "python",
             "class_name": "SendMessageTool"
+        },
+        "send_email": {
+            "path": "/Users/samsonganta/Desktop/jarvis-assistant/modules/agent_skills/skill_bridge_tools.py",
+            "description": "Send an email to a recipient. Input: {'to': str (email address OR contact name OR 'me'), 'subject': str, 'body': str}. Use 'me' or 'myself' to email the user. Use a contact name for anyone in the address book.",
+            "type": "python",
+            "class_name": "SendEmailTool"
         },
         "control_music": {
             "path": "/Users/samsonganta/Desktop/jarvis-assistant/modules/agent_skills/skill_bridge_tools.py",
@@ -11563,5 +11563,5 @@
             "type": "markdown"
         }
     },
-    "last_updated": 1776589476.0
+    "last_updated": 1776605709.0
 }

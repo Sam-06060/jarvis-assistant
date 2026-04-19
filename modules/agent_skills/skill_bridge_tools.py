@@ -9,6 +9,7 @@ The two systems are now unified through this bridge.
 Auto-discovered by SkillRegistrar on startup — no manual registration needed.
 """
 
+import re
 import logging
 from .base import AgentTool
 
@@ -70,13 +71,21 @@ class SendEmailTool(AgentTool):
     name = "send_email"
     description = (
         "Send an email to a recipient. "
-        "Input: {'to': str (email address or contact name), 'subject': str, 'body': str}."
+        "Input: {'to': str (email address OR contact name OR 'me'), 'subject': str, 'body': str}. "
+        "Use 'me' or 'myself' to email the user. Use a contact name for anyone in the address book."
     )
     tier = 2  # Requires user confirmation
     permission = "destructive"
 
+    # Self-reference patterns — all resolve to USER_EMAIL
+    _SELF_REFS = re.compile(
+        r"^(me|myself|my email|the user|samson frank ganta|samson ganta|samson)$",
+        re.IGNORECASE,
+    )
+
     def run(self, inp: dict) -> str:
-        to = inp.get("to", "").strip()
+        # Accept both 'to' and 'recipient' keys (backward compat)
+        to = (inp.get("to") or inp.get("recipient") or "").strip()
         subject = inp.get("subject", "(No Subject)").strip()
         body = inp.get("body", "").strip()
 
@@ -88,13 +97,36 @@ class SendEmailTool(AgentTool):
         if not email_mgr:
             return "Error: Email manager is not loaded."
 
-        # ── Contact Resolution ──
-        to_address = to
-        if contacts and "@" not in to:
+        # ── 1. Self-reference priority — always wins ──────────────────────
+        if self._SELF_REFS.match(to) or "@" not in to and self._is_self_ref(to):
+            import config as _cfg
+            to_address = getattr(_cfg, "USER_EMAIL", "")
+            if not to_address:
+                return "Error: USER_EMAIL is not configured. Please set it in your .env file."
+            logger.info(f"📧 Self-reference '{to}' → {to_address}")
+
+        # ── 2. Already a valid email ──────────────────────────────────────
+        elif "@" in to:
+            to_address = to
+
+        # ── 3. Name-based contact lookup ─────────────────────────────────
+        elif contacts:
             resolved = contacts.get_email(to)
             if resolved:
                 to_address = resolved
-                logger.info(f"📧 Resolved recipient '{to}' to '{to_address}'")
+                logger.info(f"📧 Resolved contact '{to}' → {to_address}")
+            else:
+                # Last resort: try USER_EMAIL if name loosely matches user
+                import config as _cfg
+                to_address = getattr(_cfg, "USER_EMAIL", "")
+                if not to_address:
+                    return f"Error: No email found for '{to}' and USER_EMAIL is not configured."
+                logger.warning(f"📧 No contact match for '{to}', falling back to USER_EMAIL: {to_address}")
+        else:
+            import config as _cfg
+            to_address = getattr(_cfg, "USER_EMAIL", "")
+            if not to_address:
+                return f"Error: Contact manager unavailable and '{to}' is not a valid email."
 
         try:
             result = email_mgr.send_email(to_address=to_address, subject=subject, body=body)
@@ -102,6 +134,11 @@ class SendEmailTool(AgentTool):
         except Exception as e:
             logger.error(f"SendEmailTool error: {e}")
             return f"Error sending email: {str(e)}"
+
+    def _is_self_ref(self, text: str) -> bool:
+        """Check if text loosely refers to the current user."""
+        t = text.lower().strip()
+        return any(w in t for w in ("samson", "sam", "user", "my email", "myself"))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

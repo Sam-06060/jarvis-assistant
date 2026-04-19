@@ -225,6 +225,15 @@ class TaskPlanner:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _classify_complexity(self, task: str) -> str:
+        """
+        Complexity is determined by the number of DISTINCT DELIVERABLES the user wants,
+        not by verb count or word length. This prevents over-engineering.
+
+        Tiers:
+          trivial  — 0-1 deliverable, single atomic action
+          simple   — 2-3 deliverables, direct tool chain
+          complex  — 4+ deliverables OR genuine research/build tasks
+        """
         text = task.lower()
         words = text.split()
         wc = len(words)
@@ -233,32 +242,46 @@ class TaskPlanner:
         if _MUSIC_GUARD & set(words):
             return "trivial"
 
-        # Very short commands (< 8 words) are ALWAYS trivial — no LLM call needed.
-        # This is the critical fix: "run this file", "check the weather", "what time is it"
-        # should never trigger multi-step planning.
-        if wc < 8 and "\n" not in task:
+        # Trivial: short commands with no connectors
+        if wc < 10 and "\n" not in task and not any(s in text for s in _MULTI_STEP_SIGNALS):
             return "trivial"
 
-        # Research framing → "research"
-        if any(s in text for s in _RESEARCH_SIGNALS) and wc >= 6:
-            return "research"
+        # Market data is ALWAYS simple regardless of length — direct tool available
+        from modules.live_data_service import LiveDataService
+        is_market = LiveDataService.is_market_data_query(task)
+        if is_market:
+            return "simple"
 
-        # Explicit multi-step language → "complex"
+        # Count distinct DELIVERABLES (what the user wants as output)
+        # These are concrete outcomes: a file, an email, a message, a web result
+        deliverable_signals = [
+            ("save", "file", "write", "create", ".md", ".txt", ".py", ".json"),  # file
+            ("email", "mail", "send email"),                                        # email
+            ("message", "whatsapp", "text", "imessage"),                             # message
+            ("search", "look up", "find", "research", "web"),                       # web lookup
+            ("remind", "alarm", "timer", "schedule"),                               # reminder
+            ("play", "music", "song", "spotify"),                                   # media
+            ("weather", "forecast", "temperature"),                                 # weather
+            ("calculate", "compute", "math"),                                       # calc
+        ]
+        deliverable_count = sum(
+            1 for group in deliverable_signals
+            if any(kw in text for kw in group)
+        )
+
+        if deliverable_count <= 1:
+            return "trivial"
+        if deliverable_count <= 3:
+            return "simple"
+
+        # Genuine research/build requests still go complex
+        has_research = any(s in text for s in _RESEARCH_SIGNALS)
+        if has_research or (wc >= 35 and ("\n" in task or "://" in task)):
+            return "complex"
+
+        # Explicit multi-step language
         if any(s in text for s in _MULTI_STEP_SIGNALS):
             return "complex"
-
-        # Multiple distinct action verbs → "complex"
-        found_verbs = [v for v in _ACTION_VERBS if f" {v} " in f" {text} "]
-        if len(found_verbs) >= 2:
-            return "complex"
-
-        # Long structured prompt → "complex"
-        if wc >= 20 and ("\n" in task or ":" in task):
-            return "complex"
-
-        # Medium length, single intent → "simple"
-        if wc < 15:
-            return "trivial"
 
         return "simple"
 
@@ -269,62 +292,71 @@ class TaskPlanner:
     def _llm_decompose(
         self, task: str, available_tools: List[str], complexity: str
     ) -> List[PlanStep]:
-        """One structured LLM call to produce a JSON plan array."""
+        """
+        Tool-aware plan decomposition.
+        Injects actual tool names+descriptions so the LLM maps to REAL tools,
+        not abstract fictional steps. Caps plans at 5 steps (simple) or 8 (complex).
+        """
+        # Build a compact tool reference — name + one-line description
+        tool_lines = []
+        if self.registry:
+            for entry in self.registry.get_all():
+                if entry.id in available_tools:
+                    desc = (entry.description or "")[:80]
+                    tool_lines.append(f"  - {entry.id}: {desc}")
+        if not tool_lines:
+            # Fallback: plain list
+            tool_lines = [f"  - {t}" for t in available_tools[:20]]
+        tools_desc = "\n".join(tool_lines) or "  - web_search\n  - write_file"
 
-        tools_list = ", ".join(available_tools[:20]) or "web_search, write_file"
-        
-        # Soften the research note so it doesn't force things if not needed.
-        if complexity == "research":
-            research_note = (
-                "This is a RESEARCH task. \n"
-                "1. If specialized expertise is needed, use 'search_awesome_skills' to find playbooks.\n"
-                "2. Include a verification step if formatting or data accuracy is critical.\n"
-                "3. If providing code, ensure there is a step to execute it and verify output."
-            )
-        elif complexity == "complex":
-            research_note = (
-                "This is a COMPLEX task. \n"
-                "Use the simplest necessary sequence of tools. Only use verification or expert search if strictly necessary."
+        max_steps = 5 if complexity == "simple" else 8
+
+        if complexity == "complex":
+            mandate = (
+                "### COMPLEX TASK MANDATE:\n"
+                "Break into logical dependency steps.\n"
+                "Use the sandbox (run_command) for code generation/testing.\n"
+                "Only use search_awesome_skills for genuinely novel tasks with no direct tool."
             )
         else:
-            research_note = ""
+            mandate = (
+                "### PRAGMATIC MANDATE (SIMPLE TASK):\n"
+                "Map EACH user deliverable to EXACTLY ONE tool call.\n"
+                "NEVER add research, methodology-verification, or configuration steps.\n"
+                "NEVER use run_command to write email scripts — use send_email tool directly.\n"
+                "NEVER use run_command to fetch market data — use get_market_data directly.\n"
+                "'me' / 'myself' as recipient = use USER_EMAIL from system context directly."
+            )
 
         system = (
-            "You are JARVIS, a world-class Senior Software Architect. Output ONLY valid JSON. "
-            "Your planning must be PRAGMATIC: "
-            "1. Choose the simplest, most reliable technology for the target platform (e.g., HTML5/JS for Web). "
-            "2. Prioritize the 'Sandbox → Test → Deploy' pipeline for code generation. "
-            "3. For ANY coding task, the plan MUST include a validation step using 'run_command' in the sandbox."
+            "You are JARVIS task planner. Output ONLY valid JSON — no prose, no markdown fences.\n"
+            "GOLDEN RULE: Every step maps to exactly one tool from the Available Tools list.\n"
+            "FORBIDDEN steps: 'research methodology', 'configure X', 'verify cross-source', "
+            "'identify calculation method', 'set up environment'. These are hallucinated steps.\n"
+            "If a direct tool exists for the action, USE IT. Never write code when a tool handles it."
         )
-        prompt = f"""Decompose the following task into a precise, ordered sequence.
-            
-Available tools: {tools_list}
-            
-Task: {task}
-            
-{research_note}
-            
-Rules:
-1. USE SANDBOX FIRST: For all code generation/development, write to the sandbox and test before moving to production (Desktop).
-2. TARGET PLATFORM ALIGNMENT: Match tools to the target environment. (e.g. Do NOT use Unreal Engine or native Desktop apps for 'Web' tasks unless specifically requested).
-3. FEWEST STEPS: Use the simplest sequence that guarantees institutional-depth quality.
-4. DEPENDENCY VALIDATION: If a step creates a file, the next step MUST verify its existence or execute it.
-5. NO GHOST COMPLETIONS: Never assume a task is done without verifying tool output.
-6. For market data, use 'get_market_data'. Do NOT plan research steps for simple data retrieval.
-7. Output ONLY a JSON array:
 
-[
-  {{"id": 1, "description": "Write HTML5/JS game code to sandbox", "tool": "write_file", "depends_on": [], "output_type": "file"}},
-  {{"id": 2, "description": "Test code in sandbox terminal", "tool": "run_command", "depends_on": [1], "output_type": "text"}},
-  {{"id": 3, "description": "Deploy verified folder to Desktop", "tool": "run_command", "depends_on": [2], "output_type": "action_confirmed"}}
-]"""
-
+        prompt = (
+            f"Decompose this task into at most {max_steps} ordered steps.\n\n"
+            f"Available Tools:\n{tools_desc}\n\n"
+            f"Task: {task}\n\n"
+            f"{mandate}\n\n"
+            "Output ONLY a JSON array. Each object must have:\n"
+            '  {"id": int, "description": "short action", "tool": "exact_tool_name", '
+            '"depends_on": [list of step ids], "output_type": "text"|"file"|"data"|"action_confirmed"}\n\n'
+            "Example for \'get gold price, save to file, email me\':\n"
+            '[{"id":1,"description":"Get live gold price","tool":"get_market_data","depends_on":[],"output_type":"data"},\n'
+            ' {"id":2,"description":"Save price data to ~/Desktop/gold.md","tool":"write_file","depends_on":[1],"output_type":"file"},\n'
+            ' {"id":3,"description":"Email results to user","tool":"send_email","depends_on":[1],"output_type":"action_confirmed"}]'
+        )
 
         try:
             raw = self.brain.ask(prompt, system_prompt=system, is_agentic=False)
             if not raw:
                 raise ValueError("Empty response from LLM")
-            return self._parse_plan(raw.strip(), available_tools)
+            steps = self._parse_plan(raw.strip(), available_tools)
+            # Hard-cap
+            return steps[:max_steps]
         except Exception as e:
             logger.warning(f"📋 TaskPlanner LLM decompose failed ({e}) — falling back to single-step.")
             best_tool = self._guess_tool(task, available_tools)
@@ -384,25 +416,47 @@ Rules:
             "backtest", "strategy", "why", "explain", "deep dive", "top ",
             "best ", "volatility", "moving average",
         ]
-        if complexity in {"research", "complex"} or any(term in text for term in complex_terms):
+        # Deep research or complex trend analysis still requires the LLM decomposition
+        if complexity == "research" or any(term in text for term in complex_terms):
             return None
 
         asks_delivery = any(k in text for k in ("email", "mail", "send it", "send me"))
+        asks_save = any(k in text for k in ("save", "file", "write", "record", "goldybhai.md", ".md", ".txt"))
+        
         market_tool = "get_market_data" if "get_market_data" in available_tools else (
             "web_search" if "web_search" in available_tools else self._guess_tool(task, available_tools)
         )
 
         steps = [PlanStep(
             id=1,
-            description=f"Get the live market data requested by the user: {task}",
+            description=f"Get the live market data: {task}",
             tool=market_tool,
             expected_output_type="data",
         )]
 
-        if asks_delivery and "send_email" in available_tools and any(k in text for k in ("email", "mail")):
+        current_id = 2
+        if asks_save and "write_file" in available_tools:
+            # Try to extract filename
+            fname = "market_data.md"
+            if "goldybhai.md" in text: fname = "goldybhai.md"
+            elif ".md" in text: 
+                match = re.search(r"(\w+\.md)", text)
+                if match: fname = match.group(1)
+            
             steps.append(PlanStep(
-                id=2,
-                description="Email the retrieved live market data to the user.",
+                id=current_id,
+                description=f"Save the retrieved data to {fname} on the Desktop.",
+                tool="write_file",
+                depends_on=[1],
+                input_from_step=1,
+                expected_output_type="file",
+            ))
+            current_id += 1
+
+        if asks_delivery and "send_email" in available_tools:
+            steps.append(PlanStep(
+                id=current_id,
+                description="Email the results to the user.",
                 tool="send_email",
                 depends_on=[1],
                 input_from_step=1,

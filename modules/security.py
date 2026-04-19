@@ -3,6 +3,7 @@ import os
 import numpy as np
 import subprocess
 import sys
+import threading
 
 # Lazy imports for speed
 face_recognition = None

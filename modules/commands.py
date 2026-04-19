@@ -315,11 +315,6 @@ class CommandProcessor:
             
             # Route to AgentCore if: shell command, AGENTIC_TASK intent, or architect intent
             if _is_shell_cmd or intent == "AGENTIC_TASK" or intent in ("ARCHITECT_NEW", "ARCHITECT_UPDATE_MINOR", "ARCHITECT_UPDATE_MAJOR"):
-                if getattr(config, "ENABLE_PLANNER_SPLIT", False) and not cmd.startswith("__PLAN_MODE__"):
-                    logger.info(f"🤖 [SPLIT MODE] Routing to Planner-Executor: '{cmd}'")
-                    from modules.planner_executor import execute_split_plan
-                    return execute_split_plan(cmd, self.registry)
-                
                 logger.info(f"🤖 Routing to AgentCore — intent={intent}: '{cmd}'")
                 return "USE_AI_BRAIN"
 
@@ -621,7 +616,15 @@ class CommandProcessor:
                         # Register BEFORE exec so that relative imports during
                         # module execution can find the package immediately
                         sys.modules[module_name] = module
-                        spec.loader.exec_module(module)
+                        try:
+                            spec.loader.exec_module(module)
+                        except Exception as exec_err:
+                            # The module failed to load (e.g. missing import at class body).
+                            # Remove the poisoned entry so sibling tools in the same file
+                            # don't silently load from a broken module object.
+                            sys.modules.pop(module_name, None)
+                            _module_cache.pop(module_name, None)
+                            raise exec_err
                         _module_cache[module_name] = module
 
                     # Instantiate the tool class with CommandProcessor as context
@@ -632,7 +635,29 @@ class CommandProcessor:
                 except Exception as e:
                     logger.error(f"❌ Failed to load tool '{tool_name}': {e}")
 
-            logger.info(f"🛠️ Agentic ToolsRegistry: {len(self.tools)}/{len(indexed_tools)} tools loaded.")
+            loaded_count = len(self.tools)
+            total_count = len(indexed_tools)
+            logger.info(f"🛠️ Agentic ToolsRegistry: {loaded_count}/{total_count} tools loaded.")
+
+            # ── Critical Tool Health Check ─────────────────────────────────
+            # Warn loudly if any mission-critical tool failed to load.
+            # This surfaces import errors immediately rather than causing
+            # mysterious "tool not available" failures mid-task.
+            CRITICAL_TOOLS = {
+                "send_email":      "skill_bridge_tools.py (check imports)",
+                "write_file":      "sandbox_tools.py",
+                "get_market_data": "market_data_tools.py",
+                "web_search":      "web_tools.py",
+            }
+            missing_critical = [
+                f"'{t}' ({hint})" for t, hint in CRITICAL_TOOLS.items()
+                if t not in self.tools
+            ]
+            if missing_critical:
+                logger.critical(
+                    f"⚠️  CRITICAL TOOLS MISSING — agentic tasks will fail silently:\n"
+                    + "\n".join(f"   • {m}" for m in missing_critical)
+                )
 
 
 

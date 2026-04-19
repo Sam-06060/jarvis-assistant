@@ -4,27 +4,11 @@ from .base import AgentTool
 
 logger = logging.getLogger(__name__)
 
-class EmailTool(AgentTool):
-    name = "send_email"
-    description = "Send an email. Input: {'recipient': str, 'subject': str, 'body': str}. Requires confirmation."
-    tier = 2
-    permission = "destructive"
-
-    def run(self, inp: dict):
-        email_mgr = self.cp.registry.get("email")
-        if not email_mgr: return "Email manager unavailable."
-        
-        recipient = inp.get('recipient', '').lower()
-        # PRIORITY RECIPIENTS: Force configured email if it's 'me' or variants
-        self_pattern = re.compile(r"^(me|myself|user|your|samson.*)$")
-        if self_pattern.match(recipient) or not recipient or "@" not in recipient:
-            from config import USER_EMAIL
-            recipient = USER_EMAIL
-        
-        success = email_mgr.send_email(recipient, inp.get('subject', ''), inp.get('body', ''))
-        status = str(success)
-        is_sent = "sent to" in status.lower() and "failed" not in status.lower()
-        return status if is_sent else f"Failed to send email: {status}"
+# NOTE: EmailTool is intentionally NOT defined here.
+# The authoritative SendEmailTool lives in skill_bridge_tools.py and
+# includes full contact resolution (name → email, "me" → USER_EMAIL).
+# Having a duplicate here caused the weaker version to sometimes win
+# registration, breaking "email me" / name-based recipient support.
 
 class SearchContactTool(AgentTool):
     name = "search_contact"

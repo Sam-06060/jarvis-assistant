@@ -207,8 +207,8 @@ AGENTIC_LLM_PROVIDER = os.getenv("AGENTIC_LLM_PROVIDER", "groq")
 AGENTIC_LLM_MODEL = os.getenv("AGENTIC_LLM_MODEL", "llama-3.3-70b-versatile")
 
 # ============== AGENTIC MODE (Modular/Toggleable) ==============
-ENABLE_AGENTIC_MODE = False
-ENABLE_PLANNER_SPLIT = True  # Enable the new Planner-Executor Orchestration for complex tasks
+ENABLE_AGENTIC_MODE = True
+ENABLE_PLANNER_SPLIT = False  # DISABLED: StatelessPlanner created plan-within-plan loops. AgentCore.TaskPlanner handles all agentic tasks directly.
 AGENTIC_MAX_ITERATIONS = 20  # Max steps in a single ReAct loop (hard capped by execution guards)
 AGENTIC_TIMEOUT_SECONDS = 300 # Per-step guards handle real limits; this is the outer bound
 TOOL_CALL_MAX_RETRIES = 3    # Bounds: 0-5 — each retry MUST use a different approach
