@@ -7,6 +7,7 @@ googlesearch-python==1.2.5
 beautifulsoup4==4.12.3
 psutil==5.9.8
 requests==2.32.3
+yfinance>=0.2.40
 SpeechRecognition==3.10.1
 PyAudio==0.2.14
 webrtcvad==2.0.10

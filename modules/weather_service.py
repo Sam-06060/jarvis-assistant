@@ -14,10 +14,41 @@ class WeatherService:
         self.location_cache = None
     
     def _get_location(self):
-        """Get Latitude/Longitude from IP"""
+        """Get Latitude/Longitude natively via CoreLocation config or fallback to IP"""
         if self.location_cache:
             return self.location_cache
             
+        import config
+        from utils.logger import get_logger
+        logger = get_logger()
+        
+        # 1. Native CoreLocation Path (Synced from Swift App)
+        lat = getattr(config, "MAC_LOCATION_LAT", None)
+        lon = getattr(config, "MAC_LOCATION_LON", None)
+        
+        if lat is not None and lon is not None:
+            logger.info(f"📍 Using exact Apple CoreLocation coordinates: {lat}, {lon}")
+            try:
+                # Reverse geocoding to get City/Locality details natively (e.g. Bandra vs Mumbai)
+                headers = {'User-Agent': 'Jarvis_Assistant/1.0'}
+                url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=14"
+                res = requests.get(url, headers=headers, timeout=5)
+                if res.status_code == 200:
+                    address = res.json().get('address', {})
+                    # Nominatim gives 'suburb', 'city', 'town', 'village'
+                    city = address.get('suburb') or address.get('city') or address.get('town') or address.get('village') or "Your Location"
+                    country = address.get('country', "Unknown")
+                    self.location_cache = {"lat": lat, "lon": lon, "city": city, "country": country}
+                    return self.location_cache
+            except Exception as e:
+                logger.warning(f"⚠️ Native reverse geocoding failed: {e}. Missing localized name.")
+            
+            # If reverse-geocoding failed, use raw coordinates
+            self.location_cache = {"lat": lat, "lon": lon, "city": "Your Location", "country": "Unknown"}
+            return self.location_cache
+
+        # 2. Network IP Fallback Path (ip-api.com)
+        logger.warning("📍 Native Mac CoreLocation not synced in config. Falling back to Network IP-API...")
         try:
             # Free IP Geolocation API
             response = requests.get("http://ip-api.com/json/", timeout=5)
@@ -31,7 +62,7 @@ class WeatherService:
                 }
                 return self.location_cache
         except Exception as e:
-            print(f"⚠️ Geolocation failed: {e}")
+            logger.error(f"⚠️ Network Geolocation failed: {e}")
             return None
             
     def get_weather(self, location_query=""):

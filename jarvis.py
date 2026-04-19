@@ -25,27 +25,31 @@ import config
 from core.registry import ServiceRegistry
 from core.events import EventManager
 
-# --- MODULE IMPORTS ---
-try:
-    from modules.speech import SpeechEngine
-    from modules.brain import AIBrain
-    from modules.file_manager import FileManager
-    from modules.system_info import SystemInfo
-    from modules.commands import CommandProcessor
-    from modules.health_checker import HealthChecker
-    from modules.analytics import Analytics
-    from modules.conversation_history import ConversationHistory
-    from modules.hotkey_manager import HotkeyManager
-    from utils.context_manager import ContextManager
-    from utils.fuzzy_matcher import FuzzyMatcher
-    from utils.offline_cache import OfflineCache
-    from utils.audio_manager import play_sound, duck_audio, restore_audio
+# --- WARP SPEED PRE-WARM (Phase 10: Nuclear Startup) ---
+# Start background imports for the heaviest libraries at T+0ms
+def _warp_speed_prewarm():
+    try:
+        # Pre-warm PyObjC (Foundation, Speech, AVFoundation)
+        import Foundation, Speech, AVFoundation
+        # Pre-warm heavy data/ai libs
+        import pandas, requests, yfinance, sklearn
+        # Pre-warm core brain
+        from modules.brain import AIBrain
+        logger.debug("⚡ Warp Speed Pre-warm: Heavy modules heated")
+    except Exception: pass
 
-    # HUD & Sockets
-    from modules.socket_server import JarvisSocketServer
+threading.Thread(target=_warp_speed_prewarm, daemon=True, name="WarpSpeed-Prewarm").start()
+
+logger.info("TEST: Imports completed")
+
+try:
+    from utils.audio_manager import play_sound, duck_audio, restore_audio
 except ImportError as e:
     logger.critical(f"❌ Critical Import Error: {e}")
     sys.exit(1)
+
+
+# _load_runtime_dependencies has been removed for Phase 2 parallel import optimizations
 
 # --- OPTIONAL MODULES (Graceful Degradation) ---
 def safe_import(module_name, class_name, config_flag=None):
@@ -83,83 +87,94 @@ class JarvisApp:
         self.agent = None
         
     def initialize_systems(self):
-        """Initialize all subsystems with error handling"""
-        logger.info("🔧 Initializing Subsystems...")
+        """Initialize all subsystems with HYPER-PARALLEL execution for speed."""
+        from concurrent.futures import ThreadPoolExecutor
+        import time
+        t_start = time.time()
+        logger.info("🔧 Initializing Subsystems (Nuclear Parallel)...")
         
-        # 🔐 Check all macOS permissions FIRST (before any module needs them)
-        try:
-            from utils.permission_checker import check_all_permissions
-            check_all_permissions()
-        except Exception as e:
-            logger.warning(f"⚠️ Permission checker failed: {e}")
-        
-        self._update_hud("BOOTING", "Initializing Modules")
-        
-        try:
-            # 1. Core Systems
-            # Initialize & Register via Registry
-            speech = SpeechEngine(hud_queue=self.hud_queue)
-            ServiceRegistry.register("speech", speech)
-            
-            context = ContextManager()
-            ServiceRegistry.register("context", context)
-
-            if config.ENABLE_FUZZY_MATCHING:
-                fuzzy = FuzzyMatcher()
-                ServiceRegistry.register("fuzzy", fuzzy)
-            
-            # Initialize History BEFORE Brain so Brain has memory
-            history = None
+        # 🔐 Check all macOS permissions in background thread
+        def check_perms_bg():
             try:
-                if config.STORE_CONVERSATION_HISTORY:
-                    history = ConversationHistory()
-                    ServiceRegistry.register("history", history)
-                    logger.info("🧠 Conversation History Loaded")
+                from utils.permission_checker import check_all_permissions
+                check_all_permissions()
             except Exception as e:
-                 logger.warning(f"⚠️ Failed to load ConversationHistory: {e}")
+                logger.warning(f"⚠️ Permission checker failed: {e}")
+        threading.Thread(target=check_perms_bg, daemon=True, name="PermCheck-Bg").start()
 
-            brain = AIBrain(
-                context_manager=history, # Pass History instead of ContextManager
-                offline_cache=OfflineCache()
-            )
-            ServiceRegistry.register("brain", brain)
-
-            files = FileManager()
-            ServiceRegistry.register("files", files)
-
-            sys_info = SystemInfo()
-            ServiceRegistry.register("system", sys_info)
-
-            # Phase 5: Health Watchdog
-            from core.health import HealthWatchdog
-            watchdog = HealthWatchdog()
-            watchdog.initialize()
-            ServiceRegistry.register("health", watchdog)
+        self._update_hud("BOOTING", "Warp Speed Init")
+        
+        try:
+            # Result containers for thread safety in assignments
+            _speech = [None]; _history = [None]; _files = [None]; _sys_info = [None]
             
-            # 2. Security (FaceID)
-            if getattr(config, "ENABLE_FACE_ID", True):
-                try:
+            def init_speech():
+                from modules.speech import SpeechEngine
+                s = SpeechEngine(hud_queue=self.hud_queue)
+                ServiceRegistry.register("speech", s)
+                _speech[0] = s
+            def init_history():
+                from modules.conversation_history import ConversationHistory
+                h = ConversationHistory()
+                ServiceRegistry.register("history", h); _history[0] = h
+            def init_files():
+                from modules.file_manager import FileManager
+                f = FileManager(); ServiceRegistry.register("files", f); _files[0] = f
+            def init_sysinfo():
+                from modules.system_info import SystemInfo
+                si = SystemInfo(); ServiceRegistry.register("system", si); _sys_info[0] = si
+            def init_faceid_bg():
+                if getattr(config, "ENABLE_FACE_ID", True):
                     from modules.security import FaceID
-                    face_id = FaceID(reference_image_path="data/me.jpg", hud_queue=self.hud_queue)
-                    ServiceRegistry.register("face_id", face_id)
-                    logger.info("🔒 FaceID System Loaded")
-                except Exception as e:
-                    logger.warning(f"⚠️ FaceID Load Failed: {e}")
+                    fid = FaceID(reference_image_path="data/me.jpg", hud_queue=self.hud_queue)
+                    ServiceRegistry.register("face_id", fid)
             
-            # 3. Optional Managers (Lazy loading if possible, but instantiating here)
-            # (Keeping logic inline for readability during refactor)
+            # --- WAVE 1: CORE PARALLEL (Critical for Interaction) ---
+            with ThreadPoolExecutor(max_workers=10, thread_name_prefix="JarvisWarp") as pool:
+                # Essential for T-0 Interaction
+                core_futs = [
+                    pool.submit(init_speech),
+                    pool.submit(init_history),
+                    pool.submit(init_files),
+                    pool.submit(init_sysinfo),
+                ]
+                
+                # WAVE 2: Dependent Heavies (Start immediately, but don't block 'Core Ready' signal)
+                def init_brain_late():
+                    while not _history[0]: time.sleep(0.01)
+                    from modules.brain import AIBrain; from utils.offline_cache import OfflineCache
+                    brain = AIBrain(context_manager=_history[0], offline_cache=OfflineCache())
+                    ServiceRegistry.register("brain", brain)
+                
+                def init_commander_late():
+                    while not ServiceRegistry.get("speech"): time.sleep(0.01)
+                    from modules.commands import CommandProcessor
+                    commander = CommandProcessor(ServiceRegistry)
+                    ServiceRegistry.register("commander", commander)
+
+                # Background these heavily
+                pool.submit(init_brain_late)
+                pool.submit(init_commander_late)
+                pool.submit(init_faceid_bg)
+                
+                # Wait ONLY for Core logic to be ready
+                from concurrent.futures import wait
+                wait(core_futs)
+
+            # --- PHASE C: Secondary Background ---
             self._init_optional_modules()
             
-            # 4. Command Processor (The Brain-Body Connection)
-            # Phase 3 will largely empty this init, but for now we pass registry or nothing
-            commander = CommandProcessor(ServiceRegistry)
-            ServiceRegistry.register("commander", commander)
+            def init_memory_bg():
+                from modules.memory_manager import MemoryManager
+                memory_mgr = MemoryManager(history_component=_history[0], knowledge_file="data/knowledge.json")
+                ServiceRegistry.register("memory", memory_mgr)
+            threading.Thread(target=init_memory_bg, daemon=True, name="MemoryInit").start()
 
-            logger.info("✅ Command Processor Initialized")
-
-            # Agentic mode is now OFF by default on startup.
-            # Use 'agentic mode on' to activate during a session.
-
+            # Initialize Agentic Mode based on config
+            if getattr(config, "ENABLE_AGENTIC_MODE", False):
+                self._toggle_agent(True, silent=True)
+                
+            logger.info(f"⏱️ TOTAL INIT: {time.time()-t_start:.2f}s")
         except Exception as e:
             logger.critical(f"❌ FATAL INITIALIZATION ERROR: {e}", exc_info=True)
             self._update_hud("ERROR", "Startup Failed")
@@ -221,53 +236,63 @@ class JarvisApp:
 
 
     def start(self):
-        """Main Application Loop"""
+        """Main Application Loop — Refactored for INSTANT Socket Binding"""
+        t_boot = time.time()
         logger.info("🚀 Starting Main Loop")
         
-        # 1. Start Socket Server (API)
+        # 1. Start Socket Server (API) — MUST BE FIRST for instant Mac App sync
         api_input_queue = queue.Queue()
+        from modules.socket_server import JarvisSocketServer
         self.api_server = JarvisSocketServer(port=8492, input_queue=api_input_queue, hud_queue=self.hud_queue)
         self.api_server.start()
-        # Make the socket server accessible to skills via the registry
         ServiceRegistry.register("socket_server", self.api_server)
-        
-        # Wrap hud_queue for broadcasting to socket (Desktop App syncing)
         self._wrap_hud_queue_for_sockets()
+        logger.info(f"⏱️ Socket server ready: {time.time()-t_boot:.2f}s")
 
-        # 2. Health Check
-        if config.CHECK_HEALTH_ON_STARTUP:
-            self._update_hud("BOOTING", "System Check")
-            checker = HealthChecker()
-            checker.run_all_checks()
-            if checker.is_critical_failure():
-                logger.error("❌ Health check failed. Aborting start.")
-                return
+        # 2. Register PlanMode (needs early socket routing)
+        try:
+            from modules.plan_mode import PlanMode
+            plan_mode = PlanMode(brain=None, registry=ServiceRegistry)
+            ServiceRegistry.register("plan_mode", plan_mode)
+        except Exception: pass
 
-        # 3. Initialize Everything
-        self.initialize_systems()
+        # 3. Initialize Everything in BACKGROUND thread to keep socket responsive
+        def _execute_boot_chain():
+            # Health check (Moved inside background chain)
+            if config.CHECK_HEALTH_ON_STARTUP:
+                from modules.health_checker import HealthChecker
+                HealthChecker().run_all_checks()
+            
+            # --- HYPER INITIALIZATION ---
+            self.initialize_systems()
 
-        # 4. Background Services
-        reminders = ServiceRegistry.get("reminders")
-        if reminders:
-            reminders.start_background_check()
-        
-        # 5. Hotkeys
-        self._setup_hotkeys()
+            # Background Services
+            reminders = ServiceRegistry.get("reminders")
+            if reminders: reminders.start_background_check()
+            self._setup_hotkeys()
 
-        # 6. Welcome
-        speech = ServiceRegistry.get("speech")
-        if speech:
-            speech.play_wake_sound()
-            speech.speak("All systems online.")
-        
-        # 🟢 PROACTIVE SYNC: Broadcast actual agent state to ensure UI is in sync at boot
-        status = "ON" if self.agent is not None else "OFF"
-        self._update_hud("SYSTEM", f"Agentic Mode: {status}")
-        self._update_hud("IDLE", "Online")
+            # Finalize Online Status
+            speech = ServiceRegistry.get("speech")
+            if speech:
+                speech.play_wake_sound()
+                speech.speak("All systems online.")
+            
+            # Proactive Sync
+            status = "ON" if self.agent is not None else "OFF"
+            self._update_hud("SYSTEM", f"Agentic Mode: {status}")
+            self._update_hud("IDLE", "Online")
+            logger.info(f"⏱️ ═══ TOTAL BOOT TIME: {time.time()-t_boot:.2f}s ═══")
+
+        threading.Thread(target=_execute_boot_chain, daemon=True, name="BootChain").start()
 
         # 7. EVENT LOOP
         while self.is_running:
             try:
+                # Readiness Guard: Don't process loops until core interaction is ready
+                if not ServiceRegistry.get("speech"):
+                    time.sleep(0.1)
+                    continue
+                    
                 self._main_loop_iteration(api_input_queue)
             except KeyboardInterrupt:
                 logger.info("🛑 KeyboardInterrupt caught in Main Loop")
@@ -686,6 +711,12 @@ class JarvisApp:
             log_history(ServiceRegistry.get("history"), command_text, "Success", "command")
             return True 
             
+        elif isinstance(result, str):
+            # Explicit string return from a sync tool execution (like planner_executor)
+            log_history(ServiceRegistry.get("history"), command_text, result, "command")
+            speech.speak(result, allow_interruptions=True)
+            return True
+            
         return False
 
     def _run_command_with_interrupt_guard(self, commander, command, web_search, speech):
@@ -738,6 +769,8 @@ class JarvisApp:
         self._update_hud("IDLE", reason)
 
     def _setup_hotkeys(self):
+        from modules.hotkey_manager import HotkeyManager
+
         def go_to_sleep():
             logger.info("⛔️ Manual Stop Triggered")
             speech = ServiceRegistry.get("speech")
@@ -835,6 +868,7 @@ class JarvisApp:
         logger.warning(f"🔄 Restarting Service: {service_name}")
         try:
             if service_name == "speech":
+                from modules.speech import SpeechEngine
                 old_speech = ServiceRegistry.get("speech")
                 if old_speech: old_speech.stop()
                 
@@ -851,6 +885,8 @@ class JarvisApp:
                 return True
             
             elif service_name == "brain":
+                from modules.brain import AIBrain
+                from utils.offline_cache import OfflineCache
                 # Re-init brain
                 brain = AIBrain(
                     context_manager=ServiceRegistry.get("history"),
@@ -1011,6 +1047,18 @@ def main():
 
     api_mode = "--api" in sys.argv
     
+    # --- PHASE: PLANNER-EXECUTOR MODE ---
+    if "--plan" in sys.argv:
+        plan_index = sys.argv.index("--plan")
+        if plan_index + 1 < len(sys.argv):
+            prompt = sys.argv[plan_index + 1]
+            from modules.planner_executor import run_planner_executor_cli
+            run_planner_executor_cli(prompt)
+            sys.exit(0)
+        else:
+            print("❌ ERROR: --plan requires a prompt argument enclosed in quotes.")
+            sys.exit(1)
+            
     if config.DEV_MODE or api_mode:
         # Single Process Mode or API Mode (No Terminal HUD)
         class LogQueue:

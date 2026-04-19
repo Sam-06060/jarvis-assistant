@@ -14,8 +14,8 @@ class FaceID:
         self.white_img_path = os.path.abspath("data/white.jpg")
         self.known_face_encoding = None
         self.hud_queue = hud_queue
-        # We delay loading until needed or explicitly called
-        self.load_reference_face()
+        # Nuclear Startup: Load reference face in background to avoid blocking boot
+        threading.Thread(target=self.load_reference_face, daemon=True, name="FaceID-Loader").start()
 
     def _ensure_imports(self):
         global face_recognition, cv2

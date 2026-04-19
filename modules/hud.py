@@ -124,9 +124,11 @@ class IronManHUD:
         try:
             while not self.queue.empty():
                 msg_type, content = self.queue.get_nowait()
-                if msg_type in ["IDLE", "LISTENING", "PROCESSING", "SPEAKING", "BOOTING", "ERROR", "OFFLINE", "SECURITY"]:
-                    self.status_header = msg_type
+                if msg_type in ["IDLE", "LISTENING", "PROCESSING", "SPEAKING", "BOOTING", "ERROR", "OFFLINE", "SECURITY", "AGENT"]:
+                    # Map AGENT to PROCESSING for visual consistency
+                    self.status_header = "PROCESSING" if msg_type == "AGENT" else msg_type
                     self.status_detail = content
+
                 elif msg_type == "USER":
                     self.conversation_log.append(("USER", content))
                 elif msg_type == "JARVIS":

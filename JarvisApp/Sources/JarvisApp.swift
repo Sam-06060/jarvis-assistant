@@ -7,6 +7,7 @@ struct JarvisApp: App {
     @StateObject var processManager = ProcessManager()
     @StateObject var socketClient = SocketClient()
     @StateObject var acController = JarvisACController()
+    @StateObject var locationManager = JarvisLocationManager()
 
     var body: some Scene {
         WindowGroup {
@@ -17,6 +18,7 @@ struct JarvisApp: App {
                 .onAppear {
                     // Request Permissions explicitly to trigger macOS Prompt
                     requestPermissions()
+                    locationManager.requestPermission()
 
                     // Wire AC hardware bridge into the socket client
                     socketClient.acController = acController
@@ -27,6 +29,17 @@ struct JarvisApp: App {
                     // Connect to Socket after short delay
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
                         socketClient.connect()
+                    }
+                }
+                .onChange(of: locationManager.location) { newLoc in
+                    if let loc = newLoc {
+                        socketClient.pushLocationCoordinate(loc)
+                    }
+                }
+                .onChange(of: socketClient.isConnected) { connected in
+                    // If socket connects after location was found (race condition fix)
+                    if connected, let loc = locationManager.location {
+                        socketClient.pushLocationCoordinate(loc)
                     }
                 }
                 .onDisappear {

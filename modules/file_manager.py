@@ -71,7 +71,7 @@ class FileManager:
         return True, "Path is safe"
     
     def create_file(self, filename, content=""):
-        """Create a new file with safety checks"""
+        """Create a new file with safety checks. Auto-creates parent directories."""
         filename = os.path.expanduser(filename)
         try:
             # Safety check
@@ -79,14 +79,19 @@ class FileManager:
             if not safe:
                 self._log_operation("create", filename, False, message)
                 return f"❌ {message}"
-            
+
+            # Auto-create parent directories (e.g. ~/Desktop/AuthProject/)
+            parent_dir = os.path.dirname(filename)
+            if parent_dir:
+                os.makedirs(parent_dir, exist_ok=True)
+
             # Create file
             with open(filename, 'w') as f:
                 f.write(content)
-            
+
             self._log_operation("create", filename, True)
             return f"✅ File created: {filename}"
-            
+
         except Exception as e:
             self._log_operation("create", filename, False, e)
             return f"❌ Error creating file: {e}"

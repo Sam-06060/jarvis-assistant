@@ -207,36 +207,46 @@ OUTPUT FORMAT (JSON ONLY):
 
     def _extract_json_array(self, text):
         """
-        Extremely robust JSON array extractor.
-        Handles markdown backticks, trailing text, and partial blocks.
+        Extremely robust JSON array extractor with Auto-Repair.
+        Handles markdown backticks, conversational filler, and truncation.
         """
         import json
+        if not text: return None
         text = text.strip()
         
+        # 0. Strip possible markdown code block wrappers
+        text = re.sub(r'^```json\s*', '', text, flags=re.MULTILINE)
+        text = re.sub(r'^```\s*', '', text, flags=re.MULTILINE)
+        text = re.sub(r'\s*```$', '', text, flags=re.MULTILINE)
+        
         # 1. Try direct find for any array [ ] structure
-        # We find the FIRST [ and the LAST ] that balances it.
         start = text.find('[')
         end = text.rfind(']')
         
         if start != -1 and end != -1:
             json_str = text[start:end+1]
-            try:
-                return json.loads(json_str)
-            except json.JSONDecodeError:
-                # 2. Try cleaning common offenders (markdown, extra text)
-                # Look for the last valid ] if there's trailing garbage
-                while end > start:
-                    try:
-                        return json.loads(text[start:end+1])
-                    except:
-                        end = text.rfind(']', start, end)
+        if start != -1:
+            # Try to find the best possible ending
+            potential_ends = [i for i, char in enumerate(text) if char == '}']
+            for p_end in reversed(potential_ends):
+                # Try closing the array here
+                candidate = text[start:p_end+1] + "]"
+                try:
+                    return json.loads(candidate)
+                except:
+                    continue
+            
+            # If no array closure worked, try the raw text if it was already closed
+            if end != -1:
+                try: return json.loads(text[start:end+1])
+                except: pass
         
-        # 3. Last ditch: regex search for anything resembling an array
-        match = re.search(r'\[\s*\{.*\}\s*\]', text, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group(0))
-            except: pass
+        # 3. Last ditch: Regex find logic
+        matches = re.findall(r'\[\s*\{.*\}\s*\]', text, re.DOTALL)
+        if matches:
+            for m in reversed(matches): # Try largest/last matches first
+                try: return json.loads(m)
+                except: pass
             
         return None
 

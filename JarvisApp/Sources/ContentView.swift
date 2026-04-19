@@ -160,6 +160,9 @@ private struct ActiveChatScreen: View {
 
     private var chatMessages: [JarvisMessage] {
         socketClient.messages.filter {
+            if $0.type == "approval_request" {
+                return true
+            }
             let header = ($0.header ?? "").uppercased()
             guard header == "USER" || header == "JARVIS" else { return false }
             return !isEphemeralThinkingMessage($0)
@@ -198,10 +201,24 @@ private struct ActiveChatScreen: View {
                     newestAssistantID: newestAssistantID,
                     jarvisState: jarvisState,
                     chatStateLabel: chatStateLabel,
+                    heartbeatSteps: socketClient.heartbeatSteps,
                     showScrollToBottomButton: $showScrollToBottomButton,
                     forceScrollToken: $forceScrollToken
                 )
                 .frame(maxWidth: .infinity)
+
+                // Inline Plan Card — shown when Python sends a plan_render message
+                if let plan = socketClient.pendingPlan {
+                    InlinePlanCard(plan: plan, onApprove: {
+                        socketClient.sendPlanApproval(taskId: plan.task_id, approved: true)
+                    }, onReject: {
+                        socketClient.sendPlanApproval(taskId: plan.task_id, approved: false)
+                    })
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .animation(.spring(response: 0.35, dampingFraction: 0.85), value: socketClient.pendingPlan != nil)
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 6)
+                }
 
                 VStack(spacing: 0) {
                     Text("J.A.R.V.I.S can make mistakes. Check important info.")
@@ -414,6 +431,7 @@ private struct ChatStreamView: View {
     let newestAssistantID: UUID?
     let jarvisState: JarvisUIState
     let chatStateLabel: String?
+    let heartbeatSteps: [HeartbeatStep]
     @Binding var showScrollToBottomButton: Bool
     @Binding var forceScrollToken: Int
 
@@ -431,7 +449,11 @@ private struct ChatStreamView: View {
                             guard index > 0 else { return false }
                             return (messages[index - 1].header ?? "").uppercased() == "USER"
                         }()
-                        if isUser {
+                        
+                        if message.type == "approval_request" {
+                            CommandApprovalBubble(message: message)
+                                .id(message.id)
+                        } else if isUser {
                             UserBubble(text: message.text)
                                 .id(message.id)
                         } else {
@@ -455,6 +477,13 @@ private struct ChatStreamView: View {
                         StateShimmerIndicatorView(label: indicatorLabel)
                             .padding(.top, 2)
                             .id("state_indicator_\(indicatorLabel)")
+                    }
+
+                    // Heartbeat progress stack (live agentic step indicators)
+                    if !heartbeatSteps.isEmpty {
+                        HeartbeatStackView(steps: heartbeatSteps)
+                            .padding(.top, 6)
+                            .id("heartbeat_stack")
                     }
 
                     Color.clear
@@ -546,7 +575,7 @@ private struct ChatStreamView: View {
         let isAtBottom = bottomAnchorMaxY <= (viewportMaxY + atBottomThreshold)
 
         shouldAutoFollow = isAtBottom
-        let shouldShow = isAtBottom
+        let shouldShow = !isAtBottom
         if shouldShow != showScrollToBottomButton {
             withAnimation(.spring(response: 0.22, dampingFraction: 0.9)) {
                 showScrollToBottomButton = shouldShow
@@ -591,6 +620,143 @@ private struct UserBubble: View {
                 )
                 .frame(maxWidth: 520, alignment: .trailing)
         }
+    }
+}
+
+private struct CommandApprovalBubble: View {
+    @EnvironmentObject var socketClient: SocketClient
+    let message: JarvisMessage
+    
+    @State private var isExpanded = false
+    @State private var status: String = "pending" // "approved" or "rejected"
+    
+    var parsedPayload: (command: String, description: String, risk: String) {
+        let defaultReturn = ("Unknown Command", "No description provided.", "Unknown")
+        guard let dataStr = message.data, 
+              let data = dataStr.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return defaultReturn
+        }
+        return (
+            json["command"] as? String ?? defaultReturn.0,
+            json["description"] as? String ?? defaultReturn.1,
+            json["risk"] as? String ?? defaultReturn.2
+        )
+    }
+    
+    var riskColor: Color {
+        let r = parsedPayload.risk.lowercased()
+        if r.contains("critical") || r.contains("high") || r.contains("danger") || r.contains("extreme") || r.contains("severe") { 
+            return .red 
+        }
+        if r.contains("low") || r.contains("safe") || r.contains("minimal") { 
+            return .green 
+        }
+        return .yellow
+    }
+    
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 0) {
+                // Header
+                HStack {
+                    Image(systemName: "terminal.fill")
+                        .foregroundColor(.white.opacity(0.8))
+                    Text("SYSTEM REQUEST")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundColor(.white.opacity(0.9))
+                    Spacer()
+                    Text(parsedPayload.risk.uppercased())
+                        .font(.system(size: 10, weight: .bold))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(riskColor.opacity(0.15))
+                        .foregroundColor(riskColor)
+                        .cornerRadius(4)
+                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(riskColor.opacity(0.3), lineWidth: 1))
+                }
+                .padding(12)
+                .background(Color(hex: 0x222222))
+                
+                // Body
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(parsedPayload.command)
+                        .font(.system(.subheadline, design: .monospaced))
+                        .foregroundColor(.green)
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.black.opacity(0.4))
+                        .cornerRadius(6)
+                    
+                    if isExpanded {
+                        Text(parsedPayload.description)
+                            .font(.system(size: 14))
+                            .foregroundColor(.white.opacity(0.75))
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
+                    
+                    Button(action: { withAnimation { isExpanded.toggle() } }) {
+                        Text(isExpanded ? "Show Less" : "Show More")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.gray)
+                    }
+                    .buttonStyle(.plain)
+                    
+                    if status == "pending" {
+                        HStack(spacing: 12) {
+                            Button(action: { handleDecision(false) }) {
+                                Text("Reject")
+                                    .font(.system(size: 14, weight: .bold))
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 8)
+                                    .background(Color.red.opacity(0.12))
+                                    .foregroundColor(.red)
+                                    .cornerRadius(6)
+                                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.red.opacity(0.25), lineWidth: 1))
+                            }
+                            .buttonStyle(.plain)
+                            
+                            Button(action: { handleDecision(true) }) {
+                                Text("Approve & Run")
+                                    .font(.system(size: 14, weight: .bold))
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 8)
+                                    .background(Color.green.opacity(0.12))
+                                    .foregroundColor(.green)
+                                    .cornerRadius(6)
+                                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.green.opacity(0.25), lineWidth: 1))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.top, 4)
+                    } else {
+                        HStack {
+                            Spacer()
+                            Text(status == "approved" ? "✅ Execution Approved" : "❌ Execution Rejected")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(status == "approved" ? .green : .red)
+                            Spacer()
+                        }
+                        .padding(.top, 4)
+                    }
+                }
+                .padding(14)
+            }
+            .background(Color(hex: 0x1A1A1A))
+            .cornerRadius(12)
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.08), lineWidth: 1))
+            .frame(maxWidth: 550, alignment: .leading)
+            .shadow(color: Color.black.opacity(0.2), radius: 8, x: 0, y: 4)
+            
+            Spacer(minLength: 36)
+        }
+        .padding(.top, 8)
+    }
+    
+    private func handleDecision(_ approved: Bool) {
+        guard status == "pending" else { return }
+        status = approved ? "approved" : "rejected"
+        socketClient.sendApprovalResponse(id: message.header ?? "", approved: approved)
     }
 }
 
@@ -773,6 +939,255 @@ private struct StateShimmerIndicatorView: View {
     }
 }
 
+// MARK: - Heartbeat Progress Stack (Agentic Real-Time Activity)
+
+private struct HeartbeatStackView: View {
+    let steps: [HeartbeatStep]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(steps) { step in
+                HeartbeatStepRow(step: step)
+            }
+        }
+        .padding(.vertical, 4)
+        .animation(.easeInOut(duration: 0.2), value: steps.count)
+    }
+}
+
+private struct HeartbeatStepRow: View {
+    let step: HeartbeatStep
+    @State private var pulse = false
+
+    private var icon: String {
+        switch step.status {
+        case .active, .thinking:
+            return "circle.fill"
+        case .success:
+            return "checkmark.circle.fill"
+        case .failed:
+            return "xmark.circle.fill"
+        case .clear:
+            return "circle"
+        }
+    }
+
+    private var iconColor: Color {
+        switch step.status {
+        case .active:
+            return .cyan.opacity(0.95)
+        case .thinking:
+            return .white.opacity(0.5)
+        case .success:
+            return .green.opacity(0.9)
+        case .failed:
+            return .red.opacity(0.9)
+        case .clear:
+            return .gray.opacity(0.4)
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ZStack {
+                Image(systemName: icon)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(iconColor)
+                    .scaleEffect(step.status == .active && pulse ? 1.15 : 1.0)
+
+                if step.status == .active {
+                    Circle()
+                        .stroke(iconColor.opacity(0.4), lineWidth: 1)
+                        .frame(width: 16, height: 16)
+                        .scaleEffect(pulse ? 1.8 : 1.0)
+                        .opacity(pulse ? 0.0 : 0.6)
+                }
+            }
+            .frame(width: 16, height: 16)
+            .animation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true), value: pulse)
+
+            if step.status == .active || step.status == .thinking {
+                ShimmerText(
+                    text: step.label,
+                    color: step.status == .thinking ? .white.opacity(0.5) : .white.opacity(0.85),
+                    shimmering: step.status == .active
+                )
+                .font(.system(size: 13, weight: .regular))
+            } else {
+                Text(step.label)
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundColor(step.status == .success ? .white.opacity(0.6) : .red.opacity(0.75))
+                    .strikethrough(step.status == .failed, color: .red.opacity(0.4))
+            }
+
+            Spacer()
+
+            if step.totalSteps > 0 {
+                Text("\(step.stepIndex + 1)/\(step.totalSteps)")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundColor(.white.opacity(0.3))
+            }
+        }
+        .padding(.horizontal, 4)
+        .onAppear {
+            if step.status == .active {
+                pulse = true
+            }
+        }
+    }
+}
+
+// MARK: - Inline Plan Card (Plan Mode UI)
+
+private struct InlinePlanCard: View {
+    let plan: PlanPayload
+    let onApprove: () -> Void
+    let onReject: () -> Void
+
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header
+            HStack(spacing: 10) {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(.cyan)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Implementation Plan")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.white)
+                    Text(plan.goal)
+                        .font(.system(size: 11, weight: .regular))
+                        .foregroundColor(.white.opacity(0.55))
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                Text("\(plan.steps.count) steps")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundColor(.cyan.opacity(0.7))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Color.cyan.opacity(0.1))
+                    .clipShape(Capsule())
+
+                Button(action: { withAnimation(.easeInOut(duration: 0.2)) { expanded.toggle() } }) {
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.white.opacity(0.4))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+
+            // Steps list (collapsible)
+            if expanded {
+                Divider().background(Color.white.opacity(0.08))
+
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(plan.steps) { step in
+                        HStack(alignment: .top, spacing: 10) {
+                            // Step number circle
+                            ZStack {
+                                Circle()
+                                    .fill(Color.cyan.opacity(0.15))
+                                    .frame(width: 22, height: 22)
+                                Text("\(step.number)")
+                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                    .foregroundColor(.cyan)
+                            }
+
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(step.title)
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundColor(.white.opacity(0.9))
+
+                                HStack(spacing: 6) {
+                                    Label(step.tool, systemImage: "wrench.adjustable")
+                                        .font(.system(size: 10, weight: .regular))
+                                        .foregroundColor(.white.opacity(0.4))
+                                }
+                            }
+
+                            Spacer()
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+
+                        if step.number < plan.steps.count {
+                            Divider().background(Color.white.opacity(0.05)).padding(.leading, 48)
+                        }
+                    }
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
+            Divider().background(Color.white.opacity(0.08))
+
+            // Approve / Reject buttons
+            HStack(spacing: 8) {
+                Button(action: onReject) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text("Reject")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .foregroundColor(.red.opacity(0.85))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9)
+                    .background(Color.red.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.red.opacity(0.2), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+
+                Button(action: onApprove) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text("Approve & Run")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .foregroundColor(.green.opacity(0.95))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9)
+                    .background(Color.green.opacity(0.1))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.green.opacity(0.25), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 14)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14)
+                        .stroke(
+                            LinearGradient(
+                                colors: [Color.cyan.opacity(0.35), Color.white.opacity(0.08)],
+                                startPoint: .topLeading, endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 1
+                        )
+                )
+        )
+        .shadow(color: Color.cyan.opacity(0.12), radius: 16, x: 0, y: 4)
+        .shadow(color: Color.black.opacity(0.4), radius: 10, x: 0, y: 6)
+        .onAppear {
+            // Auto-expand if ≤ 5 steps so user can see the plan immediately
+            if plan.steps.count <= 5 { expanded = true }
+        }
+    }
+}
+
 private struct ShimmerText: View {
     let text: String
     let color: Color
@@ -917,6 +1332,8 @@ private struct MarkdownText: View {
                             autoStyle: true
                         )
                     }
+                case .table(let rows):
+                    MarkdownTableView(rows: rows)
                 }
             }
         }
@@ -960,6 +1377,60 @@ private struct InlineMarkdownText: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+private struct MarkdownTableView: View {
+    let rows: [String]
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 0) {
+                let parsedRows = rows.map { parseRow($0) }
+                ForEach(Array(parsedRows.enumerated()), id: \.offset) { index, columns in
+                    let isHeader = index == 0
+                    let isDivider = isDividerRow(columns)
+                    
+                    if isDivider {
+                        Rectangle()
+                            .fill(Color.white.opacity(0.14))
+                            .frame(height: 1)
+                    } else {
+                        HStack(spacing: 24) {
+                            ForEach(Array(columns.enumerated()), id: \.offset) { colIndex, text in
+                                Text(text)
+                                    .font(.system(size: 15, weight: isHeader ? .bold : .regular, design: .monospaced))
+                                    .foregroundColor(.white.opacity(isHeader ? 0.98 : 0.85))
+                                    .frame(minWidth: 80, alignment: .leading)
+                            }
+                        }
+                        .padding(.vertical, 10)
+                        .padding(.horizontal, 16)
+                        .background(
+                            isHeader ? Color.white.opacity(0.08) : (index % 2 == 0 ? Color.clear : Color.white.opacity(0.03))
+                        )
+                    }
+                }
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color.white.opacity(0.1), lineWidth: 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .padding(.vertical, 8)
+    }
+
+    private func parseRow(_ row: String) -> [String] {
+        let trimmed = row.trimmingCharacters(in: .whitespaces)
+        var cols = trimmed.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+        if cols.first == "" { cols.removeFirst() }
+        if cols.last == "" && !cols.isEmpty { cols.removeLast() }
+        return cols
+    }
+
+    private func isDividerRow(_ cols: [String]) -> Bool {
+        return cols.contains { $0.contains("---") }
     }
 }
 
@@ -1027,6 +1498,7 @@ private enum MarkdownBlock: Equatable {
     case paragraph(String)
     case divider
     case spacer
+    case table([String])
 }
 
 private enum MarkdownLayoutParser {
@@ -1036,6 +1508,14 @@ private enum MarkdownLayoutParser {
         var blocks: [MarkdownBlock] = []
         var emittedTextBlockCount = 0
         var paragraphBuffer: [String] = []
+        var tableBuffer: [String] = []
+
+        func flushTable() {
+            if !tableBuffer.isEmpty {
+                blocks.append(.table(tableBuffer))
+                tableBuffer.removeAll(keepingCapacity: true)
+            }
+        }
 
         func flushParagraph() {
             let merged = paragraphBuffer.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1054,10 +1534,19 @@ private enum MarkdownLayoutParser {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty {
                 flushParagraph()
+                flushTable()
                 if blocks.last != .spacer {
                     blocks.append(.spacer)
                 }
                 continue
+            }
+
+            if isTableRow(trimmed) {
+                flushParagraph()
+                tableBuffer.append(trimmed)
+                continue
+            } else {
+                flushTable()
             }
 
             if let heading = parseHeading(trimmed) {
@@ -1104,6 +1593,7 @@ private enum MarkdownLayoutParser {
         }
 
         flushParagraph()
+        flushTable()
         while blocks.last == .spacer {
             blocks.removeLast()
         }
@@ -1157,6 +1647,11 @@ private enum MarkdownLayoutParser {
             .replacingOccurrences(of: "\\r\\n", with: "\n")
             .replacingOccurrences(of: "\\n", with: "\n")
             .replacingOccurrences(of: "\\t", with: "\t")
+    }
+
+    private static func isTableRow(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        return trimmed.hasPrefix("|") && trimmed.contains("|") && trimmed.count > 3
     }
 
     private static func isDivider(_ line: String) -> Bool {
@@ -1310,6 +1805,23 @@ private struct ChatInputBar: View {
             }
             .buttonStyle(.plain)
             .disabled(!socketClient.isConnected || socketClient.isAgenticModeTransitionPending)
+
+            // Plan Mode button — sends __PLAN_MODE__ prefix to trigger plan generation
+            Button(action: {
+                let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { return }
+                socketClient.send(text: "__PLAN_MODE__ \(text)", webSearch: false)
+                inputText = ""
+            }) {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        ? .white.opacity(0.3) : .cyan.opacity(0.9))
+                    .frame(width: 30, height: 30)
+            }
+            .buttonStyle(.plain)
+            .disabled(!socketClient.isConnected || inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .help("Generate a Plan before executing")
 
             Button(action: sendMessage) {
                 ZStack {

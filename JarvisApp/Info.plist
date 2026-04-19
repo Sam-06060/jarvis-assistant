@@ -24,6 +24,8 @@
     <string>Jarvis needs access to your microphone to listen to your commands.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
     <string>Jarvis needs access to speech recognition to process your voice commands instantly.</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>Jarvis requires location access to provide accurate local weather and context-aware responses natively.</string>
     <key>NSCameraUsageDescription</key>
     <string>Jarvis needs access to your camera for FaceID and visual recognition.</string>
 </dict>

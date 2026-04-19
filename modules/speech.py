@@ -6,11 +6,7 @@ import config
 from typing import Optional
 from utils.logger import get_logger
 
-# Import New Modular Components
-from modules.audio.recorder import AudioRecorder
-from modules.audio.wakeword import WakeWordEngine
-from modules.audio.transcriber import Transcriber
-from modules.audio.tts import TextToSpeech
+# Modular components are imported lazily to avoid heavy sequential initialization
 
 logger = get_logger()
 
@@ -18,13 +14,32 @@ class SpeechEngine:
     def __init__(self, hud_queue=None):
         self.hud_queue = hud_queue
         
-        # 1. Initialize Sub-Modules
-        logger.info("🎤 Initializing Audio Sub-Systems...")
+        # 1. Initialize Sub-Modules in Parallel
+        logger.info("🎤 Initializing Audio Sub-Systems (Parallel)...")
         
-        self.recorder = AudioRecorder()
-        self.wake_engine = WakeWordEngine()
-        self.transcriber = Transcriber()
-        self.tts = TextToSpeech(hud_queue=self.hud_queue)
+        self.recorder = None
+        self.wake_engine = None
+        self.transcriber = None
+        self.tts = None
+
+        def _init_recorder():
+            from modules.audio.recorder import AudioRecorder
+            self.recorder = AudioRecorder()
+        def _init_wake():
+            from modules.audio.wakeword import WakeWordEngine
+            self.wake_engine = WakeWordEngine()
+        def _init_transcriber():
+            from modules.audio.transcriber import Transcriber
+            self.transcriber = Transcriber()
+        def _init_tts():
+            from modules.audio.tts import TextToSpeech
+            self.tts = TextToSpeech(hud_queue=self.hud_queue)
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futs = [pool.submit(f) for f in [_init_recorder, _init_wake, _init_transcriber, _init_tts]]
+            for f in as_completed(futs):
+                f.result() # Will raise if any sub-init fails
         
         # State
         self.is_interrupted = False

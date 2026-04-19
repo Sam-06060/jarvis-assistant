@@ -46,6 +46,7 @@ class IntentRouter:
     ACTION_WEB_SEARCH              = "WEB_SEARCH"
     ACTION_SYSTEM_CONTROL          = "SYSTEM_CONTROL"
     ACTION_GENERAL_CONVERSATION    = "GENERAL_CONVERSATION"
+    ACTION_AGENTIC_TASK            = "AGENTIC_TASK"
 
     # Groq config
     _groq_api_key   = getattr(config, "GROQ_API_KEY", "")
@@ -153,8 +154,16 @@ class IntentRouter:
             return self._ok(self.ACTION_GENERAL_CONVERSATION, 0.9, "Weather keyword")
 
         # Time / Date
-        if unique_words & {"time", "date", "clock", "today", "tomorrow"} and len(unique_words) <= 6:
-            return self._ok(self.ACTION_GENERAL_CONVERSATION, 0.9, "Time/date keyword")
+        # GUARD: compound query mixing time + another domain (e.g. weather, news) must
+        # bypass this pre-filter so Groq can route it properly — TimeSkill alone can't answer both.
+        _other_domains = {"weather", "forecast", "temperature", "rain", "humidity",
+                          "news", "headline", "stock", "price",
+                          "email", "message", "whatsapp", "remind", "alarm"}
+        if unique_words & {"time", "date", "clock", "today", "tomorrow"}:
+            if unique_words & _other_domains:
+                return None  # compound query — let Groq handle the full thing
+            if len(unique_words) <= 6:
+                return self._ok(self.ACTION_GENERAL_CONVERSATION, 0.9, "Time/date keyword")
 
         # Alarms / Reminders
         if re.search(r"\b(set\s+(alarm|reminder|timer)|wake\s+me\s+up|remind\s+me)\b", c):
@@ -200,6 +209,13 @@ class IntentRouter:
             project_name = os.path.basename(project_path)
             project_context = f'\nCurrent active project: "{project_name}"'
 
+        # Determine if agentic mode is active for AGENTIC_TASK classification
+        agentic_mode = getattr(config, 'ENABLE_AGENTIC_MODE', False)
+        agentic_intent_line = (
+            '- AGENTIC_TASK: Multi-step tasks requiring tools (run code, scrape data, build projects, research + act)\n'
+            if agentic_mode else ''
+        )
+
         system_prompt = (
             'You are an intent classifier for Jarvis. Respond ONLY with valid JSON, no extra text.\n'
             'Classify the command into exactly one of these intents:\n'
@@ -208,10 +224,12 @@ class IntentRouter:
             '- ARCHITECT_UPDATE_MAJOR: Redesign/overhaul/refactor the current project\n'
             '- WEB_SEARCH: Factual questions, news, current data (who is X, what is Y)\n'
             '- SYSTEM_CONTROL: Control the computer (open app, volume, brightness, lock screen)\n'
+            f'{agentic_intent_line}'
             '- GENERAL_CONVERSATION: Everything else — chat, messaging, reminders, weather, music\n'
             f'{project_context}\n\n'
             'Output exactly this JSON structure:\n'
-            '{"intent": "INTENT_NAME", "confidence": 0.9, "thought": "one sentence reason"}'
+            '{"intent": "INTENT_NAME", "confidence": 0.9, "thought": "one sentence reason", "tool_hints": ["tool1", "tool2"]}\n'
+            'tool_hints: optional list of tools the task likely needs (e.g. ["web_search", "write_file"]). Omit if not applicable.'
         )
 
         headers = {
@@ -232,7 +250,7 @@ class IntentRouter:
 
         valid_intents = {
             "ARCHITECT_NEW", "ARCHITECT_UPDATE_MINOR", "ARCHITECT_UPDATE_MAJOR",
-            "WEB_SEARCH", "SYSTEM_CONTROL", "GENERAL_CONVERSATION"
+            "WEB_SEARCH", "SYSTEM_CONTROL", "GENERAL_CONVERSATION", "AGENTIC_TASK"
         }
 
         for attempt in range(1, self._max_retries + 1):
@@ -258,7 +276,8 @@ class IntentRouter:
                     return {
                         "intent": intent,
                         "confidence": float(data.get("confidence", 0.8)),
-                        "thought": data.get("thought", "")
+                        "thought": data.get("thought", ""),
+                        "tool_hints": data.get("tool_hints", []),
                     }
 
                 elif response.status_code == 429:

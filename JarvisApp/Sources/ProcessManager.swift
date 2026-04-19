@@ -19,6 +19,7 @@ class ProcessManager: ObservableObject {
         let projectRoot = "/Users/samsonganta/Desktop/jarvis-assistant"
         let pythonPath = "\(projectRoot)/.venv/bin/python3"
         let scriptPath = "\(projectRoot)/jarvis.py"
+        let launcherPath = "\(projectRoot)/scripts/launch_backend_from_app.sh"
         
         // 1. Validate Paths
         if !fileManager.fileExists(atPath: pythonPath) {
@@ -29,14 +30,19 @@ class ProcessManager: ObservableObject {
             print("❌ Error: Script not found at: \(scriptPath)")
             return
         }
+        if !fileManager.fileExists(atPath: launcherPath) {
+            print("❌ Error: Backend launcher not found at: \(launcherPath)")
+            return
+        }
         
         print("🚀 Starting Jarvis Backend... (BUILD v4.0 - NUCLEAR)")
         print("📂 Root: \(projectRoot)")
         print("🐍 Python: \(pythonPath)")
+        print("🛠️ Launcher: \(launcherPath)")
         
         process = Process()
-        // Use Python directly to ensure TCC permissions are inherited 
-        process?.executableURL = URL(fileURLWithPath: pythonPath)
+        // Launch through a shell script so we can repair invalid Python signatures before exec.
+        process?.executableURL = URL(fileURLWithPath: "/bin/bash")
         
         // CRITICAL: Inject Environment for Finder launches
         var env = ProcessInfo.processInfo.environment
@@ -45,6 +51,10 @@ class ProcessManager: ObservableObject {
         env["LC_ALL"] = "en_US.UTF-8"
         env["LANG"] = "en_US.UTF-8"
         env["PYTHONUNBUFFERED"] = "1"
+        env["JARVIS_PROJECT_ROOT"] = projectRoot
+        env["JARVIS_PYTHON_BIN"] = pythonPath
+        env["JARVIS_SCRIPT_PATH"] = scriptPath
+        env["JARVIS_BACKEND_PORT"] = "8492"
 
         // Load .env file so Python backend has ST_* credentials even when
         // the app is launched from Finder/Dock (no shell environment).
@@ -70,8 +80,8 @@ class ProcessManager: ObservableObject {
 
         process?.environment = env
         
-        // Run script directly
-        process?.arguments = ["-u", scriptPath, "--api"]
+        // Run the backend launcher instead of the Python stub directly.
+        process?.arguments = [launcherPath]
         process?.currentDirectoryURL = URL(fileURLWithPath: projectRoot)
         
         process?.standardOutput = outputPipe
@@ -79,7 +89,13 @@ class ProcessManager: ObservableObject {
         
         outputPipe?.fileHandleForReading.readabilityHandler = { handle in
              let data = handle.availableData
-             if !data.isEmpty, let str = String(data: data, encoding: .utf8) {
+             if data.isEmpty {
+                 // EOF Reached: CRITICAL - Must explicitly set to nil to prevent 100% CPU infinite loop
+                 handle.readabilityHandler = nil
+                 return
+             }
+             
+             if let str = String(data: data, encoding: .utf8) {
                  // Print directly to stdout for Terminal visibility
                  fputs("[PYTHON] \(str)", stdout)
                  fflush(stdout)
@@ -98,12 +114,16 @@ class ProcessManager: ObservableObject {
         process?.terminationHandler = { [weak self] proc in
             DispatchQueue.main.async {
                 self?.isRunning = false
-                print("🛑 Backend Exited with status: \(proc.terminationStatus)")
-                // ☢️ NUCLEAR OPTION: If backend exits cleanly, kill the app.
-                if proc.terminationStatus == 0 {
-                    print("🛑 Clean Exit Detected. Terminating App.")
-                    kill(getpid(), SIGKILL)
+                let reason: String
+                switch proc.terminationReason {
+                case .exit:
+                    reason = "exit"
+                case .uncaughtSignal:
+                    reason = "signal"
+                @unknown default:
+                    reason = "unknown"
                 }
+                print("🛑 Backend Exited. Reason: \(reason), status: \(proc.terminationStatus)")
             }
         }
         

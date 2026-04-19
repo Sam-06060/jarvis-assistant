@@ -60,6 +60,7 @@ VAD_MIN_SPEECH_DURATION = 0.3
 
 # Paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = BASE_DIR  # Alias used by agent_skills modules
 DATA_DIR = os.path.join(BASE_DIR, "data")
 MEMORY_FILE = os.path.join(DATA_DIR, "memory.json")
 REMINDERS_FILE = os.path.join(DATA_DIR, "reminders.json")
@@ -176,10 +177,16 @@ INTENT_ROUTER_GROQ_RETRIES = 3                  # Retry attempts before falling 
 INTENT_ROUTER_GROQ_RETRY_WAIT = 10              # Seconds between retries
 
 # ============== OPENROUTER CONFIG (Primary Code Generation) ==============
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = "stepfun/step-3.5-flash:free"
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-OPENROUTER_MAX_TOKENS = 32000
+# OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+# OPENROUTER_MODEL = "google/gemma-4-26b-a4b-it:free"
+# OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+# OPENROUTER_MAX_TOKENS = 32000
+
+# ============== NVIDIA CONFIG (Primary Code Generation) ==============
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
+NVIDIA_MODEL = "qwen/qwen2.5-coder-32b-instruct"
+NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
+NVIDIA_MAX_TOKENS = 8192
 
 # ============== GEMINI CONFIG (Optional) ==============
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
@@ -201,22 +208,28 @@ AGENTIC_LLM_MODEL = os.getenv("AGENTIC_LLM_MODEL", "llama-3.3-70b-versatile")
 
 # ============== AGENTIC MODE (Modular/Toggleable) ==============
 ENABLE_AGENTIC_MODE = False
-AGENTIC_MAX_ITERATIONS = 30  # Max steps in a single ReAct loop
-AGENTIC_TIMEOUT_SECONDS = 30 # Bounds: 5-120
-TOOL_CALL_MAX_RETRIES = 2    # Bounds: 0-5
+ENABLE_PLANNER_SPLIT = True  # Enable the new Planner-Executor Orchestration for complex tasks
+AGENTIC_MAX_ITERATIONS = 20  # Max steps in a single ReAct loop (hard capped by execution guards)
+AGENTIC_TIMEOUT_SECONDS = 300 # Per-step guards handle real limits; this is the outer bound
+TOOL_CALL_MAX_RETRIES = 3    # Bounds: 0-5 — each retry MUST use a different approach
+
+# ============== HEARTBEAT & PLAN MODE ==============
+HEARTBEAT_MAX_SILENCE_SECONDS = 3  # Max seconds before a generic heartbeat pulse is emitted
+PLAN_MODE_ENABLED = True            # Enable inline PLAN.md rendering in chat UI
+PLAN_PROJECTS_DIR = os.path.expanduser("~/Jarvis/Projects")
 
 @dataclass
 class AgentConfig:
     enabled: bool = field(default=False)
-    max_iterations: int = field(default=6)
-    timeout: int = field(default=30)
-    retry_budget: int = field(default=2)
+    max_iterations: int = field(default=20)
+    timeout: int = field(default=300)
+    retry_budget: int = field(default=3)
 
     def validate(self):
         """Strict bounds validation as per implementation plan"""
-        self.max_iterations = max(1, min(50, self.max_iterations))
-        self.timeout = max(5, min(120, self.timeout))
-        self.retry_budget = max(0, min(5, self.retry_budget))
+        self.max_iterations = max(1, min(30, self.max_iterations))  # Hard cap at 30
+        self.timeout = max(5, min(3600, self.timeout))
+        self.retry_budget = max(0, min(10, self.retry_budget))
 
 # ============== SMARTTHINGS CONFIGURATION ==============
 SMARTTHINGS_PAT = os.environ.get("SMARTTHINGS_PAT")

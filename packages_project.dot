@@ -1,0 +1,27 @@
+digraph "packages_project" {
+rankdir=BT
+charset="utf-8"
+"modules.agent_core" [color="black", label=<modules.agent_core>, shape="box", style="solid"];
+"modules.agent_skills" [color="black", label=<modules.agent_skills>, shape="box", style="solid"];
+"modules.agent_skills.architect_tools" [color="black", label=<modules.agent_skills.architect_tools>, shape="box", style="solid"];
+"modules.agent_skills.base" [color="black", label=<modules.agent_skills.base>, shape="box", style="solid"];
+"modules.agent_skills.communication_tools" [color="black", label=<modules.agent_skills.communication_tools>, shape="box", style="solid"];
+"modules.agent_skills.generate_catalog" [color="black", label=<modules.agent_skills.generate_catalog>, shape="box", style="solid"];
+"modules.agent_skills.memory_skill_tools" [color="black", label=<modules.agent_skills.memory_skill_tools>, shape="box", style="solid"];
+"modules.agent_skills.memory_tools" [color="black", label=<modules.agent_skills.memory_tools>, shape="box", style="solid"];
+"modules.agent_skills.research_tools" [color="black", label=<modules.agent_skills.research_tools>, shape="box", style="solid"];
+"modules.agent_skills.skill_bridge_tools" [color="black", label=<modules.agent_skills.skill_bridge_tools>, shape="box", style="solid"];
+"modules.agent_skills.skill_retriever" [color="black", label=<modules.agent_skills.skill_retriever>, shape="box", style="solid"];
+"modules.agent_skills.system_tools" [color="black", label=<modules.agent_skills.system_tools>, shape="box", style="solid"];
+"modules.agent_skills.utility_tools" [color="black", label=<modules.agent_skills.utility_tools>, shape="box", style="solid"];
+"modules.agent_skills" -> "modules.agent_skills.base" [arrowhead="open", arrowtail="none"];
+"modules.agent_skills.architect_tools" -> "modules.agent_skills.base" [arrowhead="open", arrowtail="none"];
+"modules.agent_skills.communication_tools" -> "modules.agent_skills.base" [arrowhead="open", arrowtail="none"];
+"modules.agent_skills.memory_skill_tools" -> "modules.agent_skills.base" [arrowhead="open", arrowtail="none"];
+"modules.agent_skills.memory_tools" -> "modules.agent_skills.base" [arrowhead="open", arrowtail="none"];
+"modules.agent_skills.research_tools" -> "modules.agent_skills.base" [arrowhead="open", arrowtail="none"];
+"modules.agent_skills.skill_bridge_tools" -> "modules.agent_skills.base" [arrowhead="open", arrowtail="none"];
+"modules.agent_skills.skill_retriever" -> "modules.agent_skills.base" [arrowhead="open", arrowtail="none"];
+"modules.agent_skills.system_tools" -> "modules.agent_skills.base" [arrowhead="open", arrowtail="none"];
+"modules.agent_skills.utility_tools" -> "modules.agent_skills.base" [arrowhead="open", arrowtail="none"];
+}

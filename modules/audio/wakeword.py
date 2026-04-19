@@ -38,6 +38,9 @@ class WakeWordEngine:
             return False
             
         try:
+            if not pcm_data:
+                return False
+                
             # Unpack bytes to shorts (required by Porcupine)
             # Ensure proper length
             num_samples = len(pcm_data) // 2

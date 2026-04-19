@@ -154,6 +154,29 @@ class JarvisSocketServer:
                         elif message.get("type") == "config":
                             if self.input_queue:
                                 self.input_queue.put(f"__UPDATE_CONFIG__ {json.dumps(message.get('data'))}")
+
+                        elif message.get("type") == "approval_response":
+                            req_id = message.get("id")
+                            approved = message.get("approved", False)
+                            
+                            if not hasattr(self, 'approval_results'):
+                                self.approval_results = {}
+                            self.approval_results[req_id] = approved
+                            
+                            if hasattr(self, 'approval_events') and req_id in self.approval_events:
+                                self.approval_events[req_id].set()
+
+                        elif message.get("type") == "plan_approval":
+                            # Plan Mode: user tapped Proceed or Reject in the inline plan view
+                            task_id = message.get("task_id", "")
+                            approved = message.get("approved", False)
+                            try:
+                                from core.registry import ServiceRegistry
+                                plan_mode = ServiceRegistry.get("plan_mode")
+                                if plan_mode and task_id:
+                                    plan_mode.receive_approval(task_id, approved)
+                            except Exception as _pe:
+                                logger.error(f"❌ plan_approval handler error: {_pe}")
                                 
                     except json.JSONDecodeError:
                         # Not enough data yet to form a full JSON object, wait for more packets

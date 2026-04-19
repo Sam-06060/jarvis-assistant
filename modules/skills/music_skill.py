@@ -17,7 +17,7 @@ class MusicSkill(Skill):
     def can_handle(self, command: str) -> bool:
         cmd = command.lower()
         triggers = ["music", "song", "spotify", "track", "play", "playing", "next", "previous", "skip", "pause", "resume", "shuffle"]
-        return any(t in cmd for t in triggers)
+        return any(re.search(r'\b' + t + r'\b', cmd) for t in triggers)
 
     def handle(self, command: str) -> bool:
         cmd = command.lower()
@@ -32,9 +32,9 @@ class MusicSkill(Skill):
             return False
 
         # EXPLICIT APP SELECTION ("Play X on Y")
-        if " on " in cmd and "play" in cmd:
+        if re.search(r'\bon\b', cmd) and re.search(r'\bplay\b', cmd):
             try:
-                parts = cmd.split(" on ")
+                parts = re.split(r'\bon\b', cmd, maxsplit=1)
                 if len(parts) >= 2:
                     song_request = parts[0].replace("play", "").strip()
                     target_app = parts[1].strip()

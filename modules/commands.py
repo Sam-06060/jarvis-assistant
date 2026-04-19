@@ -1,4 +1,5 @@
 import datetime
+import os
 import time
 import config
 import threading
@@ -22,6 +23,7 @@ try: from .ghost_hand import GhostHand
 except: GhostHand = None
 from .visuals import VisualsManager
 # -----------------------------------------------------
+from .registrar import SkillRegistrar
 
 class CommandProcessor:
     def __init__(self, registry_class):
@@ -49,27 +51,14 @@ class CommandProcessor:
         if self.assassin: self.registry.register("assassin", self.assassin)
         if self.ghost: self.registry.register("ghost", self.ghost)
 
-        # 3. Initialize Skills
-        #    (Imports here to prevent circular dependency during startup)
-        from modules.skills import (
-            SystemSkill, TimeSkill, AppControlSkill, WeatherSkill,
-            MusicSkill, NewsSkill, CalculatorSkill, CommunicationSkill,
-            InternetSkill, FileSkill, FocusSkill, ResearchSkill,
-            AutomationSkill, ShortcutsSkill, InteractionSkill, ArchitectSkill,
-            ReminderSkill, AnalyticsSkill, TranslatorSkill, AlarmSkill
-        )
-        from modules.skills.smartthings_skill import SmartThingsSkill
-        
-        # Phase 5: NLP Intent Engine
-        from modules.intent_router import IntentRouter
-        self.intent_router = IntentRouter()
-
+        # 3. Parallel Skills Initialization (Nuclear Startup Phase 10)
+        from concurrent.futures import ThreadPoolExecutor
         self.skills = []
-        self.memory_vault = {} # 🧠 Stage 6: Tool Chaining Memory
+        self.memory_vault = {} 
+        self._tools_ready = threading.Event()
+        self.tools = {}
         
-        # 4. Build App Context for Skills (Using Registry)
-        # In a perfect world, skills would just take the registry. 
-        # But to be backward compatible with "self.app.get('speech')", we build a dict proxy.
+        # Build App Context (Proxy for registry)
         self.app_context = {
             'registry': self.registry,
             'speech': self.registry.get('speech'),
@@ -87,7 +76,7 @@ class CommandProcessor:
             'contacts': self.registry.get('contacts'),
             'shortcuts': self.registry.get('shortcuts'),
             'ghost': self.registry.get('ghost') or self.ghost,
-            'cursor': None,  # Lazy loaded via command_processor._get_cursor()
+            'cursor': None, 
             'visuals': self.registry.get('visuals') or self.visuals,
             'assassin': self.registry.get('assassin') or self.assassin,
             'dead_drop': self.registry.get('dead_drop') or self.dead_drop,
@@ -99,64 +88,79 @@ class CommandProcessor:
             'mimic': self.registry.get('mimic') or self.mimic, 
             'translator': self.registry.get('translator'),
             'alarm_manager': self.registry.get('alarms'),
-            # AC bridge: gives skills access to socket broadcast_signal() for Swift OAuth routing
             'socket_server': self.registry.get('socket_server'),
         }
-        
-        # 5. Register Skills (Priority Order)
-        # High Priority: Interaction (Stop/Exit/Hi) & System
-        self.skills.append(SmartThingsSkill(self.app_context))
-        self.skills.append(InteractionSkill(self.app_context))
-        self.skills.append(SystemSkill(self.app_context)) 
-        self.skills.append(FocusSkill(self.app_context))
-        self.skills.append(InternetSkill(self.app_context))
-        
-        # Mid Priority: Utility & Work
-        self.skills.append(TimeSkill(self.app_context))
-        self.skills.append(ReminderSkill(self.app_context))  # NEW
-        self.skills.append(AnalyticsSkill(self.app_context))  # NEW
-        self.skills.append(TranslatorSkill(self.app_context))  # NEW
-        self.skills.append(AlarmSkill(self.app_context))
-        self.skills.append(WeatherSkill(self.app_context))
-        self.skills.append(NewsSkill(self.app_context))
-        self.skills.append(CalculatorSkill(self.app_context))
-        self.skills.append(AppControlSkill(self.app_context))
-        self.skills.append(FileSkill(self.app_context))
-        
-        # Communication (BEFORE Architect — "add contact" must not be hijacked)
-        self.skills.append(CommunicationSkill(self.app_context))
-        self.skills.append(ShortcutsSkill(self.app_context))
-        
-        # Architect (Keep reference for Intent Router)
-        self.architect_skill = ArchitectSkill(self.app_context)
-        self.skills.append(self.architect_skill)  # <--- NEW Reference
-        
-        # Low Priority: Media & Research (Complex queries)
-        self.skills.append(MusicSkill(self.app_context))
-        self.skills.append(ResearchSkill(self.app_context))
-        self.skills.append(AutomationSkill(self.app_context))
-        
-        logger.info("✅ Skills Architecture Loaded")
 
-        # 6. Build Command Index for Fuzzy Matching & Speech Context
-        self.command_phrases = []
-        for skill in self.skills:
-            if hasattr(skill, 'get_phrases'):
-                phrases = skill.get_phrases()
-                if phrases:
-                    self.command_phrases.extend(phrases)
-        
-        # Remove duplicates and sort
-        self.command_phrases = sorted(list(set(self.command_phrases)))
-        
-        # Pass context to Speech Engine (if supported)
-        speech = self.registry.get('speech')
-        if speech and hasattr(speech, 'set_phrases'):
-            speech.set_phrases(self.command_phrases)
-            logger.info(f"✅ Loaded {len(self.command_phrases)} Command Phrases into Speech Context")
+        # Background: Intent Router (Start ASAP)
+        def init_intent_bg():
+            from modules.intent_router import IntentRouter
+            self.intent_router = IntentRouter()
+        threading.Thread(target=init_intent_bg, daemon=True, name="IntentInit").start()
 
-        # 7. Initialize Agentic Tooling (Phase 3)
-        self._setup_tools()
+        # Parallel Skill Loading
+        def _load_all_skills():
+            t_skills = time.time()
+            from modules.skills import (
+                SystemSkill, TimeSkill, AppControlSkill, WeatherSkill,
+                MusicSkill, NewsSkill, CalculatorSkill, CommunicationSkill,
+                InternetSkill, FileSkill, FocusSkill, ResearchSkill,
+                AutomationSkill, ShortcutsSkill, InteractionSkill, ArchitectSkill,
+                ReminderSkill, AnalyticsSkill, TranslatorSkill, AlarmSkill
+            )
+            from modules.skills.smartthings_skill import SmartThingsSkill
+            
+            classes = [
+                SmartThingsSkill, InteractionSkill, SystemSkill, FocusSkill, InternetSkill,
+                TimeSkill, ReminderSkill, AnalyticsSkill, TranslatorSkill, AlarmSkill,
+                WeatherSkill, NewsSkill, CalculatorSkill, AppControlSkill, FileSkill,
+                CommunicationSkill, ShortcutsSkill, ArchitectSkill, MusicSkill, ResearchSkill,
+                AutomationSkill
+            ]
+            
+            with ThreadPoolExecutor(max_workers=len(classes)) as pool:
+                instances = list(pool.map(lambda cls: cls(self.app_context), classes))
+            
+            self.skills.extend(instances)
+            # Reference specifically needed for intent router
+            self.architect_skill = next((s for s in self.skills if isinstance(s, ArchitectSkill)), None)
+            logger.info(f"⚡ Skills Bootstrapped (Parallel): {time.time()-t_skills:.2f}s")
+            
+            # Background: Index Phrases for Speech Engine
+            threading.Thread(target=self._deferred_speech_context, daemon=True, name="SpeechContext").start()
+
+        threading.Thread(target=_load_all_skills, daemon=True, name="SkillsInit").start()
+
+        # 4. Agentic Tooling (Background)
+        self.registrar = SkillRegistrar(os.path.join(os.getcwd(), "modules/agent_skills"))
+        threading.Thread(target=self._deferred_tool_setup, daemon=True, name="ToolBootstrap").start()
+
+    def _deferred_speech_context(self):
+        """Builds command index and updates speech engine without blocking boot."""
+        try:
+            self.command_phrases = []
+            for skill in self.skills:
+                if hasattr(skill, 'get_phrases'):
+                    phrases = skill.get_phrases()
+                    if phrases: self.command_phrases.extend(phrases)
+            
+            self.command_phrases = sorted(list(set(self.command_phrases)))
+            speech = self.registry.get('speech')
+            if speech and hasattr(speech, 'set_phrases'):
+                speech.set_phrases(self.command_phrases)
+                logger.info(f"✅ Speech Context Primed: {len(self.command_phrases)} phrases")
+        except Exception as e:
+            logger.error(f"⚠️ Speech context indexing failed: {e}")
+
+    def _deferred_tool_setup(self):
+        """Background thread: loads agentic tools, UnifiedSkillRegistry, and MCPServer."""
+        try:
+            self._setup_tools()
+            self._tools_ready.set()
+            logger.info("⚡ Agentic tooling ready (background)")
+        except Exception as e:
+            logger.error(f"❌ Background tool setup failed: {e}")
+            self.tools = {}
+            self._tools_ready.set()  # Unblock waiters even on failure
 
     def _get_cursor(self):
         """Lazy-load CursorController only when needed (saves ~200MB RAM + GPU idle heat)"""
@@ -169,6 +173,33 @@ class CommandProcessor:
             except Exception as e:
                 logger.error(f"⚠️ Cursor Control unavailable: {e}")
         return self._cursor_instance
+
+    def _find_skill(self, skill_class_name: str):
+        """
+        Find a loaded skill instance by its class name.
+        Used by SkillBridgeTools to invoke command skills from the agent loop.
+        Example: self.cp._find_skill('CommunicationSkill')
+        """
+        for skill in self.skills:
+            if skill.__class__.__name__ == skill_class_name:
+                return skill
+        return None
+
+    def execute_tool(self, tool_name: str, tool_input: dict) -> str:
+        """
+        Execute a registered agent tool by name.
+        Called by AgentCore._execute_action() — this is the single execution gateway.
+        """
+        self._tools_ready.wait(timeout=30)  # Wait for background tool loading
+        tool = self.tools.get(tool_name)
+        if not tool:
+            return f"[!] Tool '{tool_name}' not found."
+        try:
+            return tool.run(tool_input)
+        except Exception as e:
+            logger.error(f"❌ Tool '{tool_name}' raised: {e}")
+            return f"Error running '{tool_name}': {str(e)}"
+
 
     def process(self, command_text, web_search=False):
         """
@@ -189,22 +220,74 @@ class CommandProcessor:
 
     def _is_complex_query(self, text):
         """
-        Heuristic to detect if a command is multi-step or requires planning.
-        Used to bypass simple skills and route to Agentic Core.
+        Multi-signal complexity classifier.
+        Returns True only when the request genuinely requires multi-step agentic execution.
+        False positives send simple tasks through the expensive agent loop.
+        False negatives drop complex tasks silently to brain.ask() with no tools.
         """
-        text = text.lower()
-        # 1. Conjunctions/Sequencing
-        conjunctions = [" and ", " then ", " after that ", " followed by ", " also ", " as well as "]
-        if any(c in text for c in conjunctions):
+        text_lower = text.lower()
+        word_count = len(text.split())
+
+        # DEFINITE YES — explicit sequential/multi-step language
+        multi_step_signals = [
+            " and then ", " after that ", " followed by ",
+            " then ", " afterwards ", " next, ", " finally, ",
+        ]
+        if sum(1 for s in multi_step_signals if s in text_lower) >= 1:
             return True
-            
-        # 2. Multiple action indicators (e.g., "search and email", "find and write")
-        actions = ["search", "find", "get", "look up", "tell", "email", "send", "write", "open", "play", "calculate"]
-        count = sum(1 for action in actions if action in text)
-        if count >= 2:
+
+        # DEFINITE YES — compound question across multiple skill domains
+        # e.g. "what is the time AND what is the weather in London?"
+        # Detect: two or more topic nouns from different domains joined by "and"
+        multi_topic_domains = [
+            ("time", "date", "clock"),
+            ("weather", "temperature", "forecast", "rain", "humidity"),
+            ("news", "headline", "trending"),
+            ("stock", "price", "market"),
+            ("email", "message", "whatsapp"),
+            ("reminder", "alarm", "schedule"),
+        ]
+        if " and " in text_lower:
+            matching_domains = sum(
+                1 for domain_keywords in multi_topic_domains
+                if any(kw in text_lower for kw in domain_keywords)
+            )
+            if matching_domains >= 2:
+                return True
+
+        # DEFINITE YES — two or more distinct action verbs targeting different things
+        action_verbs = [
+            "search", "find", "get", "fetch", "look up",
+            "email", "send", "write", "create", "generate",
+            "open", "play", "calculate", "translate", "summarize",
+            "analyze", "compare", "research", "book", "schedule",
+        ]
+        found_verbs = [v for v in action_verbs if f" {v} " in f" {text_lower} "]
+        # Guard: "search and play X" is a music command, not multi-step agentic work
+        music_guard = {"play", "song", "music", "spotify", "track", "album"}
+        if len(found_verbs) >= 2 and not (music_guard & set(text_lower.split())):
             return True
-            
+
+        # DEFINITE YES — long prompt with embedded structure (likely a task, not a question)
+        if word_count >= 20 and ("\n" in text or ":" in text):
+            return True
+
+        # DEFINITE YES — explicit research/analysis/report language + substance
+        research_signals = [
+            "compare ", "analyze ", "analyse ", "research ", "investigate ",
+            "summarize this", "write a report", "make a plan",
+            "pros and cons", "best options", "top options",
+        ]
+        if any(s in text_lower for s in research_signals) and word_count >= 8:
+            return True
+
+        # DEFINITE NO — short commands are never genuinely multi-step
+        if word_count < 8:
+            return False
+
         return False
+
+
 
     def _unsafe_process(self, command_text):
         cmd = command_text.strip()
@@ -219,33 +302,59 @@ class CommandProcessor:
         except Exception as e:
             logger.error(f"⚠️ Intent Router Error: {e}")
 
+        # 0.4 Agentic Force Route — intent-driven (replaces old _is_complex_query heuristic)
+        if config.ENABLE_AGENTIC_MODE:
+            intent = intent_data.get("intent", "")
+            
+            # Explicit shell execution phrasing always goes to AgentCore
+            _is_shell_cmd = bool(
+                re.search(r"^(?:run|execute)\s+the\s+(?:command|script|code|shell|terminal|bash|zsh)\b", cmd.lower())
+                or re.search(r"\bpython3?\b|\bnpm\b|\bnode\b|\bbash\b|\bzsh\b|\bsh\b|\bls\b|\bpip\b|\bgit\b", cmd.lower())
+                or (intent == "SYSTEM_CONTROL")
+            )
+            
+            # Route to AgentCore if: shell command, AGENTIC_TASK intent, or architect intent
+            if _is_shell_cmd or intent == "AGENTIC_TASK" or intent in ("ARCHITECT_NEW", "ARCHITECT_UPDATE_MINOR", "ARCHITECT_UPDATE_MAJOR"):
+                if getattr(config, "ENABLE_PLANNER_SPLIT", False) and not cmd.startswith("__PLAN_MODE__"):
+                    logger.info(f"🤖 [SPLIT MODE] Routing to Planner-Executor: '{cmd}'")
+                    from modules.planner_executor import execute_split_plan
+                    return execute_split_plan(cmd, self.registry)
+                
+                logger.info(f"🤖 Routing to AgentCore — intent={intent}: '{cmd}'")
+                return "USE_AI_BRAIN"
+
         try:
             # Direct Routing to Architect
+            # ── AGENTIC BYPASS: When agentic mode is ON, AgentCore owns ALL complex
+            # requests — the Architect skill is only active in standard mode.
+            # Without this check, ARCHITECT_NEW was firing BEFORE the agentic gate
+            # and hijacking every "build/create" request.
             architect_intents = [
                 "ARCHITECT_NEW",
                 "ARCHITECT_UPDATE_MINOR",
                 "ARCHITECT_UPDATE_MAJOR"
             ]
 
-            intent = intent_data.get("intent")
-            if intent in architect_intents and self.architect_skill:
-                if (
-                    intent_data.get("confidence", 0) >= 0.75
-                    and self._is_explicit_architect_request(cmd, intent_data)
-                ):
-                    reason = intent_data.get("reason", "No reason provided")
-                    logger.info(f"🚀 Routing to Architect via NLP ({intent}). Brain: {reason}")
+            if not config.ENABLE_AGENTIC_MODE:
+                intent = intent_data.get("intent")
+                if intent in architect_intents and self.architect_skill:
+                    if (
+                        intent_data.get("confidence", 0) >= 0.75
+                        and self._is_explicit_architect_request(cmd, intent_data)
+                    ):
+                        reason = intent_data.get("reason", "No reason provided")
+                        logger.info(f"🚀 Routing to Architect via NLP ({intent}). Brain: {reason}")
 
-                    result = self.architect_skill.handle_intent(cmd, intent_data)
-                    self._log_analytics(cmd, "architect_nlp", True, time.time() - start_time)
-                    return result if result else True
+                        result = self.architect_skill.handle_intent(cmd, intent_data)
+                        self._log_analytics(cmd, "architect_nlp", True, time.time() - start_time)
+                        return result if result else True
+            else:
+                intent = intent_data.get("intent")
+                if intent in architect_intents:
+                    logger.info(f"🤖 Agentic mode ON — Architect NLP route skipped, routing to AgentCore directly.")
+                    return "USE_AI_BRAIN"
         except Exception as e:
             logger.error(f"⚠️ NLP Architect Route Error: {e}")
-
-        # 0.4 Agentic Force Route (Multi-step requests)
-        if config.ENABLE_AGENTIC_MODE and self._is_complex_query(cmd):
-            logger.info(f"🤖 Complexity detected in '{cmd}'. Forcing Agentic Core.")
-            return "USE_AI_BRAIN"
 
         # 0.5 Regex Route (deterministic intent extraction)
         regex_route = self._regex_pre_route(cmd, intent_data)
@@ -376,8 +485,15 @@ class CommandProcessor:
             return {"skill": "AutomationSkill", "command": command_text, "reason": "summarization_intent"}
 
         # Mimic / Macro execution intent. Bypass fuzzy matcher completely for parameterized macros.
-        if re.search(r"^(?:mimic|execute|run|do)\b\s+(.+)$", cmd) or re.search(r"^(?:set this as|set this is)\s+(.+)$", cmd):
-            return {"skill": "AutomationSkill", "command": command_text, "reason": "mimic_macro_execution"}
+        # GUARD: Do NOT steal shell-execution phrasing — those go to AgentCore (SYSTEM_CONTROL).
+        # e.g. "run the command 'ls -la'", "execute python3 script.py", "do pip install ..."
+        _is_shell_phrasing = bool(
+            re.search(r"^(?:run|execute)\s+the\s+(?:command|script|code|shell|terminal|bash|zsh)\b", cmd)
+            or re.search(r"\bpython3?\b|\bnpm\b|\bnode\b|\bbash\b|\bzsh\b|\bsh\b|\bls\b|\bcd\b|\bpip\b|\bgit\b", cmd)
+        )
+        if not _is_shell_phrasing:
+            if re.search(r"^(?:mimic|execute|run|do)\b\s+(.+)$", cmd) or re.search(r"^(?:set this as|set this is)\s+(.+)$", cmd):
+                return {"skill": "AutomationSkill", "command": command_text, "reason": "mimic_macro_execution"}
 
         # Explicit Google request; generic search should use normal web-search flow.
         google_patterns = [
@@ -441,429 +557,208 @@ class CommandProcessor:
     # --- AGENTIC TOOLING (PHASE 3) ---
 
     def _setup_tools(self):
-        """Builds the tool registry by wrapping existing skills/functions."""
-        self.tools = {}
-        
-        # Helper to register
-        def reg(tool_class):
-            t = tool_class(self)
-            self.tools[t.name] = t
+        """
+        Dynamically builds the tool registry by scanning modules/agent_skills via Registrar.
+        """
+        try:
+            import sys
+            import types
+            import importlib
+            import importlib.util
 
-        # TIER 1: Safe Tools
-        class WebSearchTool:
-            name = "web_search"
-            description = "Search the internet for information. Input: {'query': str}"
-            def __init__(self, cp): self.cp = cp
-            def run(self, inp):
-                brain = self.cp.registry.get("brain")
-                if not brain: return "Brain service unavailable."
-                # We use the brain's search service directly to get ACTUAL context (not just open a browser)
-                return brain.search_engine.search(inp['query']) or "No results found for your query."
+            # ── Step 0: Ensure modules.agent_skills package is in sys.modules ──
+            # Without this, 'from .base import AgentTool' has no anchor package.
+            skills_dir_abs = os.path.abspath(self.registrar.skills_dir)
 
-        class MusicTool:
-            name = "play_music"
-            description = "Play music, songs, or artists. Input: {'action': 'play', 'song': str, 'app': str (optional, default 'Spotify')}"
-            def __init__(self, cp): self.cp = cp
-            def run(self, args):
-                self.music = self.cp.registry.get("music")
-                if not self.music: return "Music service unavailable."
-                song = args.get("song")
-                # CHAINED SKILL: Leverage the "Perfect" standard skill dispatcher
-                # Simplified query to match user vocal patterns exactly.
-                logger.info(f"🔗 Chaining MusicTool to standard Skill: play {song}")
-                self.cp.process(f"play {song}")
-                return f"Successfully triggered playback for: {song}"
+            if "modules" not in sys.modules:
+                mod_pkg = types.ModuleType("modules")
+                mod_pkg.__path__ = [os.path.dirname(skills_dir_abs)]
+                mod_pkg.__package__ = "modules"
+                sys.modules["modules"] = mod_pkg
 
-        class WeatherTool:
-            name = "get_weather"
-            description = "Get current weather or forecast. Input: {'location': str}"
-            def __init__(self, cp): self.cp = cp
-            def run(self, inp):
-                weather_service = self.cp.registry.get("weather")
-                if not weather_service: return "Weather service unavailable."
-                return weather_service.get_weather(inp.get('location', ''))
-
-        # TIER 2: Gated Tools (Action confirmation required)
-        class EmailTool:
-            name = "send_email"
-            description = "Send an email. Input: {'recipient': str, 'subject': str, 'body': str}. Requires confirmation."
-            tier = 2
-            def __init__(self, cp): self.cp = cp
-            def run(self, inp):
-                email_mgr = self.cp.registry.get("email")
-                if not email_mgr: return "Email manager unavailable."
-                recipient = inp.get('recipient', '').lower()
-                # PRIORITY RECIPIENTS: Force samson06060@gmail.com if it's 'me' or variants
-                self_pattern = re.compile(r"^(me|myself|user|your|samson.*)$")
-                if self_pattern.match(recipient) or not recipient or "@" not in recipient:
-                    from config import USER_EMAIL
-                    recipient = USER_EMAIL
-                
-                success = email_mgr.send_email(recipient, inp['subject'], inp['body'])
-                status = str(success)
-                is_sent = "sent to" in status.lower() and "failed" not in status.lower()
-                return status if is_sent else f"Failed to send email: {status}"
-
-        class FileWriteTool:
-            name = "write_file"
-            description = "Create or overwrite a file. Input: {'path': str, 'content': str}. For user files, use absolute paths like '~/Desktop/filename.ext'. Requires confirmation."
-            tier = 2
-            def __init__(self, cp): self.cp = cp
-            def run(self, inp):
-                file_mgr = self.cp.registry.get("files")
-                if not file_mgr: return "File manager service unavailable."
-                success = file_mgr.create_file(inp['path'], inp['content'])
-                return f"Successfully wrote content to {inp['path']}." if "✅" in str(success) else f"Failed to write to {inp['path']}: {success}"
-
-        class SearchContactTool:
-            name = "search_contact"
-            description = "Search for a contact's email or phone by name. Input: {'name': str}"
-            def __init__(self, cp): self.cp = cp
-            def run(self, inp):
-                contact_mgr = self.cp.registry.get("contacts")
-                if not contact_mgr: return "Contact manager unavailable."
-                return contact_mgr.search_contact(inp['name'])
-
-        class WebFetchTool:
-            name = "fetch_url"
-            description = "Fetch full text content from a specific URL. Input: {'url': str}"
-            def __init__(self, cp): self.cp = cp
-            def run(self, inp):
-                search_service = self.cp.registry.get("brain").search_engine
-                return search_service.fetch_url(inp['url'])
-
-        class WhatsAppTool:
-            name = "send_whatsapp"
-            description = "Send a WhatsApp message. Input: {'name': str, 'message': str}. Requires confirmation."
-            tier = 2
-            def __init__(self, cp): self.cp = cp
-            def run(self, inp):
-                contacts = self.cp.registry.get("contacts")
-                if not contacts: return "Contact manager unavailable."
-                return contacts.send_whatsapp_message(inp['name'], inp['message'])
-
-        # --- NEW STAGE 1 TOOLS ---
-        class ReminderTool:
-            name = "manage_reminders"
-            description = "Add, list, or remove reminders. Input: {'action': 'add'|'list'|'remove', 'text': str, 'time': str (optional for add)}. Example: {'action': 'add', 'text': 'Buy milk', 'time': '5pm'}"
-            def __init__(self, cp): self.cp = cp
-            def run(self, args):
-                self.reminders = self.cp.registry.get('reminders')
-                if not self.reminders: return "Reminder manager unavailable."
-                action = args.get("action", "list").lower()
-                if action == "list":
-                    return self.reminders.get_active_reminders()
-                elif action == "add":
-                    msg = args.get("text")
-                    when = args.get("time")
-                    return self.reminders.add_reminder(msg, when)
-                elif action == "remove":
-                    rem_id = args.get("id")
-                    return self.reminders.cancel_reminder(rem_id)
-                return "Invalid action for ReminderTool."
-
-        class AlarmTool:
-            name = "manage_alarms"
-            description = "Set or list alarms. Input: {'action': 'set'|'list', 'time': str}. Example: {'action': 'set', 'time': '7am'}"
-            def __init__(self, cp): self.cp = cp
-            def run(self, inp):
-                alarms = self.cp.registry.get('alarms')
-                if not alarms: return "Alarm manager unavailable."
-                action = inp.get('action', 'list').lower()
-                time_str = inp.get('time', '')
-                if action == 'set':
-                    success, msg = alarms.set_alarm(time_str)
-                    return msg
-                return alarms.get_active_reminders() # Fallback for listing
-
-        class CalculatorTool:
-            name = "calculator"
-            description = "Perform math calculations. Input: {'expression': str}. Example: {'expression': 'sqrt(256) * 12'}"
-            def __init__(self, cp): self.cp = cp
-            def run(self, inp):
-                calc = self.cp.registry.get("calculator")
-                if not calc: return "Calculator service unavailable."
-                result = calc.calculate(inp['expression'])
-                return f"Calculation Result: {result}"
-
-        class ACControlTool:
-            name = "control_ac"
-            description = "Controls the Samsung air conditioner via SmartThings. Input: {'action': 'turn_on'|'turn_off'|'set_temperature'|'set_mode'|'get_status'|'temp_up'|'temp_down', 'temperature_celsius': int (optional), 'mode': str (optional: 'cool'|'heat'|'auto'|'dry'|'fanOnly')}"
-            def __init__(self, cp): self.cp = cp
-
-            def _emit(self, signal: str) -> str:
-                """Relay an __AC_*__ signal via the Swift OAuth bridge."""
-                server = self.cp.app_context.get('socket_server')
-                if server and server.clients:
-                    server.broadcast_signal(signal)
-                    return None  # Success — caller builds the response string
-                return "The Jarvis Swift app isn't connected. Make sure it's running."
-
-            def run(self, inp):
-                action = inp.get("action", "")
-                if action == "turn_on":
-                    err = self._emit("__AC_ON__")
-                    return err or "The AC has been turned on."
-                elif action == "turn_off":
-                    err = self._emit("__AC_OFF__")
-                    return err or "The AC has been turned off."
-                elif action == "temp_up":
-                    err = self._emit("__AC_TEMP_UP__")
-                    return err or "Temperature increased by one degree."
-                elif action == "temp_down":
-                    err = self._emit("__AC_TEMP_DOWN__")
-                    return err or "Temperature decreased by one degree."
-                elif action == "set_temperature":
-                    temp = int(float(inp.get("temperature_celsius", 24)))
-                    err = self._emit(f"__AC_TEMP_{temp}__")
-                    return err or f"AC temperature set to {temp}°C."
-                elif action == "set_mode":
-                    mode = str(inp.get("mode", "cool")).lower()
-                    err = self._emit(f"__AC_MODE_{mode}__")
-                    return err or f"AC mode set to {mode}."
-                elif action == "get_status":
-                    err = self._emit("__AC_STATUS__")
-                    return err or "Fetching AC status — check the Swift app console."
-                return f"Unknown AC action: '{action}'."
-
-        class AppControlTool:
-            name = "control_app"
-            description = "Open or quit macOS applications. Input: {'action': 'open'|'quit', 'app_name': str}. Example: {'action': 'open', 'app_name': 'Safari'}"
-            def __init__(self, cp): self.cp = cp
-            def run(self, inp):
-                action = inp.get('action', 'open').lower()
-                app = inp['app_name']
+            if "modules.agent_skills" not in sys.modules:
                 try:
-                    import subprocess
-                    subprocess.run(["open", "-a", app], check=True, capture_output=True)
-                    return f"Successfully {action}ed {app}."
-                except Exception as e:
-                    return f"Failed to {action} {app}. Error: {str(e)}"
+                    # Happy path: __init__.py exists → just import normally
+                    importlib.import_module("modules.agent_skills")
+                except ImportError:
+                    # Fallback: create a stub package so relative imports resolve
+                    skills_pkg = types.ModuleType("modules.agent_skills")
+                    skills_pkg.__path__ = [skills_dir_abs]
+                    skills_pkg.__package__ = "modules.agent_skills"
+                    sys.modules["modules.agent_skills"] = skills_pkg
+                    logger.debug("🛠️ Stub package 'modules.agent_skills' registered in sys.modules")
 
-        class SystemControlTool:
-            name = "system_control"
-            description = "Control system volume, brightness, or lock screen. Input: {'action': 'volume_up'|'volume_down'|'mute'|'lock_screen'|'brightness_up'|'brightness_down'}"
-            def __init__(self, cp): self.cp = cp
-            def run(self, inp):
-                action = inp['action']
-                skill = self.cp._find_skill("SystemSkill")
-                if not skill: return "System Skill unavailable."
-                skill.handle(action.replace('_', ' '))
-                return f"Successfully executed system action: {action}"
+            # ── Step 1: Scan for metadata ───────────────────────────────────
+            self.registrar.scan_and_index()
+            indexed_tools = self.registrar.get_tools()
 
-        class TranslatorTool:
-            name = "translator"
-            description = "Translate text. Input: {'text': str, 'target_language': str}. Example: {'text': 'Hello', 'target_language': 'French'}"
-            def __init__(self, cp): self.cp = cp
-            def run(self, inp):
-                translator = self.cp.registry.get("translator")
-                if not translator: return "Translator service unavailable."
-                result = translator.translate(inp['text'], inp['target_language'])
-                return f"Translation ({inp['target_language']}): {result}"
+            # ── Step 2: Load each tool with proper package context ──────────
+            _module_cache: dict = {}  # path → already-loaded module (multi-tool files)
 
-        class ClockTool:
-            name = "get_time"
-            description = "Get the current time or date."
-            def __init__(self, cp): self.cp = cp
-            def run(self, inp):
-                from datetime import datetime
-                now = datetime.now()
-                return f"The current time is {now.strftime('%I:%M %p')} on {now.strftime('%A, %B %d, %Y')}."
-
-        class ClipboardTool:
-            name = "clipboard"
-            description = "Read or write to the macOS clipboard. Input: {'action': 'read'|'write', 'text': str (for write)}"
-            def __init__(self, cp): self.cp = cp
-            def run(self, inp):
-                clipboard_mgr = self.cp.registry.get("clipboard")
-                if not clipboard_mgr: return "Clipboard manager unavailable."
-                if inp.get('action') == 'write' or inp.get('action') == 'copy':
-                    return clipboard_mgr.copy(inp.get('text', ''))
-                return clipboard_mgr.paste()
-
-        # --- STAGE 5: ENVIRONMENT AWARENESS ---
-        class SystemStatusTool:
-            name = "get_system_status"
-            description = "Get detailed information about the macOS environment (battery, CPU, memory, uptime, network)."
-            def __init__(self, cp): self.cp = cp
-            def run(self, inp):
-                sys_info = self.cp.registry.get("system")
-                if not sys_info: return "System info service unavailable."
-                return sys_info.get_detailed_status()
-
-        class NowPlayingTool:
-            name = "get_now_playing"
-            description = "Find out what song is currently playing on Spotify or Apple Music."
-            def __init__(self, cp): self.cp = cp
-            def run(self, inp):
-                music = self.cp.registry.get("music")
-                if not music: return "Music service unavailable."
-                return music.get_current_track()
-
-        class RunningAppsTool:
-            name = "get_running_apps"
-            description = "Get a list of currently open applications on this Mac."
-            def __init__(self, cp): self.cp = cp
-            def run(self, inp):
-                sys_info = self.cp.registry.get("system")
-                if not sys_info: return "System info service unavailable."
-                return sys_info.get_running_apps()
-
-        # --- STAGE 6: DATA PIPING & MEMORY ---
-        class StoreMemoryTool:
-            name = "save_info"
-            description = "Save a key piece of information to your internal memory vault for later use in this task. Input: {'key': str, 'value': str}. Example: {'key': 'news_summary', 'value': 'Apple released a new Mac...'}"
-            def __init__(self, cp): self.cp = cp
-            def run(self, inp):
-                key = inp.get('key', 'default')
-                val = inp.get('value', '')
-                self.cp.memory_vault[key] = val
-                return f"✅ Saved to memory vault under '{key}'. Use 'retrieve_info' with this key later."
-
-        class RecallMemoryTool:
-            name = "retrieve_info"
-            description = "Recall a piece of information you saved earlier. Input: {'key': str}"
-            def __init__(self, cp): self.cp = cp
-            def run(self, inp):
-                key = inp.get('key', 'default')
-                val = self.cp.memory_vault.get(key)
-                if val: return f"Memory found for '{key}':\n{val}"
-                return f"Error: No information found in vault for key '{key}'."
-
-        class ListMemoryTool:
-            name = "list_memory"
-            description = "List all keys currently stored in your memory vault."
-            def __init__(self, cp): self.cp = cp
-            def run(self, inp):
-                if not self.cp.memory_vault: return "The memory vault is currently empty."
-                return f"Information currently in vault: {', '.join(self.cp.memory_vault.keys())}"
-
-        # --- STAGE 7: ARCHITECT INTEGRATION (CODEBASE ACCESS) ---
-        class ReadSourceFileTool:
-            name = "read_source_file"
-            description = "Read the content of a file in the JARVIS codebase. Input: {'path': 'relative/path/to/file.py'}"
-            def __init__(self, cp): self.cp = cp
-            def run(self, inp):
+            for tool_name, meta in indexed_tools.items():
                 try:
-                    import os
-                    rel_path = inp.get('path', '').strip()
-                    if not rel_path: return "Error: No path provided."
-                    # Security Guard: No absolute paths, no traveling up
-                    if rel_path.startswith("/") or ".." in rel_path:
-                         return "Error: Absolute paths or parent directory travel (..) are forbidden."
-                    
-                    full_path = os.path.join(config.ROOT_DIR, rel_path)
-                    if not os.path.exists(full_path):
-                        return f"Error: File not found at {rel_path}"
-                    
-                    with open(full_path, 'r', encoding='utf-8') as f:
-                        return f.read()
-                except Exception as e:
-                    return f"Error reading file: {str(e)}"
+                    path = meta["path"]
+                    class_name = meta["class_name"]
 
-        class ListSourceDirTool:
-            name = "list_source_dir"
-            description = "List files and directories in a JARVIS source folder. Input: {'path': 'relative/path'}"
-            def __init__(self, cp): self.cp = cp
-            def run(self, inp):
-                try:
-                    import os
-                    rel_path = inp.get('path', '.').strip()
-                    if rel_path.startswith("/") or ".." in rel_path:
-                         return "Error: Forbidden path."
-                    
-                    full_path = os.path.join(config.ROOT_DIR, rel_path)
-                    if not os.path.isdir(full_path):
-                        return f"Error: Directory not found at {rel_path}"
-                    
-                    items = sorted(os.listdir(full_path))
-                    return f"Contents of {rel_path}:\n" + "\n".join(items)
-                except Exception as e:
-                    return f"Error listing directory: {str(e)}"
+                    # Build the canonical module name from the filename
+                    # e.g. .../agent_skills/research_tools.py → modules.agent_skills.research_tools
+                    basename = os.path.basename(path).replace(".py", "")
+                    module_name = f"modules.agent_skills.{basename}"
 
-        class ApplySourceChangeTool:
-            name = "apply_code_change"
-            description = "Overwrite a source file with new code. Input: {'path': 'relative/path', 'content': 'full file content'}. Requires confirmation."
-            tier = 2
-            def __init__(self, cp): self.cp = cp
-            def run(self, inp):
-                try:
-                    import os
-                    rel_path = inp.get('path', '').strip()
-                    content = inp.get('content', '')
-                    if not rel_path or rel_path.startswith("/") or ".." in rel_path:
-                         return "Error: Invalid or forbidden path."
-                    
-                    full_path = os.path.join(config.ROOT_DIR, rel_path)
-                    
-                    # Ensure directory exists
-                    os.makedirs(os.path.dirname(full_path), exist_ok=True)
-                    
-                    with open(full_path, 'w', encoding='utf-8') as f:
-                        f.write(content)
-                    
-                    return f"✅ Successfully updated source file: {rel_path}"
-                except Exception as e:
-                    return f"Error applying change: {str(e)}"
+                    # Reuse cached module if this file was already loaded
+                    # (handles files that define multiple tool classes)
+                    if module_name in _module_cache:
+                        module = _module_cache[module_name]
+                    elif module_name in sys.modules:
+                        module = sys.modules[module_name]
+                    else:
+                        spec = importlib.util.spec_from_file_location(
+                            module_name, path,
+                            submodule_search_locations=[],
+                        )
+                        module = importlib.util.module_from_spec(spec)
+                        module.__package__ = "modules.agent_skills"
+                        # Register BEFORE exec so that relative imports during
+                        # module execution can find the package immediately
+                        sys.modules[module_name] = module
+                        spec.loader.exec_module(module)
+                        _module_cache[module_name] = module
 
-        # Register them
-        reg(WebSearchTool)
-        reg(WebFetchTool)
-        reg(MusicTool)
-        reg(WeatherTool)
-        reg(EmailTool)
-        reg(FileWriteTool)
-        reg(SearchContactTool)
-        reg(WhatsAppTool)
-        # Register NEW Stage 1 Tools
-        reg(ReminderTool)
-        reg(AlarmTool)
-        reg(CalculatorTool)
-        reg(ACControlTool)
-        reg(AppControlTool)
-        reg(SystemControlTool)
-        reg(TranslatorTool)
-        reg(ClockTool)
-        reg(ClipboardTool)
-        # Register STAGE 5 Tools
-        reg(SystemStatusTool)
-        reg(NowPlayingTool)
-        reg(RunningAppsTool)
-        # Register STAGE 6 Tools
-        reg(StoreMemoryTool)
-        reg(RecallMemoryTool)
-        reg(ListMemoryTool)
-        # Register STAGE 7 Tools
-        reg(ReadSourceFileTool)
-        reg(ListSourceDirTool)
-        reg(ApplySourceChangeTool)
-        logger.info(f"🛠️ Agentic ToolsRegistry initialized with {len(self.tools)} tools.")
+                    # Instantiate the tool class with CommandProcessor as context
+                    tool_class = getattr(module, class_name)
+                    tool_instance = tool_class(self)
+                    self.tools[tool_name] = tool_instance
+
+                except Exception as e:
+                    logger.error(f"❌ Failed to load tool '{tool_name}': {e}")
+
+            logger.info(f"🛠️ Agentic ToolsRegistry: {len(self.tools)}/{len(indexed_tools)} tools loaded.")
+
+
+
+            # ── Elite Architecture: UnifiedSkillRegistry + MCPServer ──────
+            try:
+                from modules.skill_registry import UnifiedSkillRegistry, SKILL_METADATA
+                skill_registry = UnifiedSkillRegistry()
+
+                # Register command skills
+                for skill in self.skills:
+                    cname = skill.__class__.__name__
+                    meta = SKILL_METADATA.get(cname, {})
+                    skill_registry.register_skill(
+                        id=cname.lower().replace("skill", "").strip("_"),
+                        name=cname,
+                        skill_obj=skill,
+                        skill_type="command_skill",
+                        description=getattr(skill, "description", cname),
+                        domain=meta.get("domain", "general"),
+                        tags=meta.get("tags", []),
+                        cost_tier=meta.get("cost_tier", 1),
+                        requires_network=meta.get("requires_network", False),
+                        side_effects=meta.get("side_effects", []),
+                    )
+
+                # Register agent tools
+                for tool_name, tool_obj in self.tools.items():
+                    meta = SKILL_METADATA.get(tool_name, {})
+                    skill_registry.register_skill(
+                        id=tool_name,
+                        name=tool_name,
+                        skill_obj=tool_obj,
+                        skill_type="agent_tool",
+                        description=getattr(tool_obj, "description", tool_name),
+                        domain=meta.get("domain", "general"),
+                        tags=meta.get("tags", []),
+                        cost_tier=meta.get("cost_tier", 1),
+                        requires_network=meta.get("requires_network", False),
+                        side_effects=meta.get("side_effects", []),
+                    )
+
+                self.registry.register("skill_registry", skill_registry)
+                logger.info(
+                    f"📚 UnifiedSkillRegistry: {len(skill_registry.get_by_type('command_skill'))} command skills + "
+                    f"{len(skill_registry.get_by_type('agent_tool'))} agent tools registered."
+                )
+
+                # Bootstrap MCPServer from the registry
+                from core.mcp import build_mcp_server_from_registry
+                speech = self.registry.get("speech")
+                mcp_server = build_mcp_server_from_registry(skill_registry, speech_service=speech)
+                self.registry.register("mcp_server", mcp_server)
+                logger.info("🔌 MCPServer bootstrapped and registered.")
+
+            except Exception as e:
+                logger.warning(f"⚠️ UnifiedSkillRegistry/MCPServer init failed: {e}")
+
+
+        except Exception as e:
+            logger.error(f"⚠️ Error auto-loading agent tools via Registrar: {e}")
+
 
     def get_tools_description(self) -> str:
         """Returns a string description of all available tools for the agent's prompt."""
+        self._tools_ready.wait(timeout=30)  # Wait for background tool loading
         descs = []
         for name, tool in self.tools.items():
             descs.append(f"- {name}: {tool.description}")
         return "\n".join(descs)
 
+    def get_playbooks_description(self) -> str:
+        """Returns a summarized description of top playbooks for the agent's prompt."""
+        self._tools_ready.wait(timeout=30)  # Wait for background tool loading
+        descs = []
+        playbooks = self.registrar.get_playbooks()
+        
+        # Limit to top 12 playbooks as "Featured Experts" to save context
+        count = 0
+        for name, meta in playbooks.items():
+            descs.append(f"- @{name}: {meta.get('summary', '---')}")
+            count += 1
+            if count >= 12: break
+            
+        if len(playbooks) > 12:
+            descs.append(f"\n... and {len(playbooks) - 12} more specialized Experts available. Use `search_awesome_skills` to discover more.")
+            
+        return "\n".join(descs)
+
     def execute_tool(self, name: str, params: Dict[str, Any]) -> str:
-        """Dispatches tool execution with confirmation logic for Tier 2."""
+        """
+        Dispatches tool execution with 3-tier permission-based gating.
+        
+        Permission tiers:
+          "safe"        — Auto-execute, no prompt (read-only / internal ops)
+          "write"       — Auto-execute with logging (file creation, state changes)
+          "destructive" — Requires HITL approval via socket UI (irreversible actions)
+        """
+        self._tools_ready.wait(timeout=30)  # Wait for background tool loading
         if name not in self.tools:
             return f"Error: Tool '{name}' not found."
         
         tool = self.tools[name]
+        permission = getattr(tool, "permission", "safe")
         
-        # Tier 2 Confirmation Gate
-        if hasattr(tool, "tier") and tool.tier == 2:
-            speech = self.registry.get("speech")
-            if speech:
-                prompt = f"I am about to use the {name.replace('_', ' ')} tool. Shall I proceed, sir?"
-                confirmed = speech.listen_confirmation(prompt)
-                
-                if confirmed is False:
-                    return "Action cancelled by user."
-                if confirmed is None:
-                    return "Action cancelled: No confirmation received within timeout."
+        # ── BACKWARD COMPAT: Honor legacy tier=2 if permission wasn't explicitly set ──
+        if permission == "safe" and getattr(tool, "tier", 1) == 2:
+            permission = "destructive"
+        
+        if permission == "destructive":
+            # Skip voice gate if the tool handles its OWN approval flow
+            # (e.g. run_command shows the socket-based "Approve & Run" UI).
+            # Asking voice AND socket confirmation is a redundant double-prompt.
+            if not getattr(tool, "self_approving", False):
+                speech = self.registry.get("speech")
+                if speech:
+                    prompt = f"I am about to use the {name.replace('_', ' ')} tool. Shall I proceed, sir?"
+                    confirmed = speech.listen_confirmation(prompt)
+
+                    if confirmed is False:
+                        return "Action cancelled by user."
+                    if confirmed is None:
+                        return "Action cancelled: No confirmation received within timeout."
+        elif permission == "write":
+            # Log-only: record the action but auto-execute
+            logger.info(f"📝 [WRITE] Auto-executing: {name} with {params}")
+        # else: "safe" — execute silently, no logging needed
         
         try:
             logger.info(f"🚀 Executing Agent Tool: {name} with {params}")

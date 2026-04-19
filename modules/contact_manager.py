@@ -4,6 +4,9 @@ import json
 import os
 import config
 import urllib.parse
+import logging
+
+logger = logging.getLogger(__name__)
 
 class ContactManager:
 
@@ -334,7 +337,21 @@ class ContactManager:
             
 
 
+            import time
+            if not hasattr(self, '_last_whatsapp_sent_time'):
+                self._last_whatsapp_sent_time = 0
+                self._last_whatsapp_data = ""
+
             if message:
+                # DEBOUNCE GUARD (Stop 2nd message if triggered within 5 seconds)
+                cache_key = f"{formatted_phone}|{message}"
+                current_time = time.time()
+                if self._last_whatsapp_data == cache_key and (current_time - self._last_whatsapp_sent_time) < 5.0:
+                    return f"Duplicate message suppressed for {resolved_name}."
+
+                self._last_whatsapp_sent_time = current_time
+                self._last_whatsapp_data = cache_key
+
                 # Apple Shortcuts requires E.164 format (+CountryCodeNumber)
                 shortcuts_phone = f"+{formatted_phone}" if not formatted_phone.startswith("+") else formatted_phone
                 
@@ -342,8 +359,19 @@ class ContactManager:
                 safe_message = message.replace("|", " ")
                 shortcut_input = f"{shortcuts_phone}|{safe_message}"
                 
-                # Use stdin (input=) instead of -i to support large multiline content (essays)
-                subprocess.run(["shortcuts", "run", "JarvisWhatsApp"], input=shortcut_input, text=True, check=False)
+                # Use a temporary file for stable input (fixes macOS Sonoma/Sequoia double-triggering bug)
+                import tempfile
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as tf:
+                    tf.write(shortcut_input)
+                    temp_path = tf.name
+
+                try:
+                    logger.info(f"💾 Triggering Shortcut with input: {shortcut_input}")
+                    subprocess.run(["shortcuts", "run", "JarvisWhatsApp", "-i", temp_path], check=False)
+                finally:
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+
                 return f"Message sent to {resolved_name}."
             else:
                 url = f"whatsapp://send?phone={formatted_phone}"

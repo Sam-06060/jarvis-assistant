@@ -294,20 +294,29 @@ CRITICAL INSTRUCTIONS:
 
         # ── GROQ PATH (cloud is up) ─────────────────────────────────────────────
         if use_cloud:
-            # Fast gate: only call Groq if pronouns actually need resolving
-            pronouns = {"he", "she", "it", "his", "her", "their", "they", "them", "him"}
-            has_pronoun = bool(pronouns & set(user_input.lower().split()))
-            if not has_pronoun:
+            # Fast gate: only call Groq if pronouns or semantic dependencies need resolving
+            pronouns = {"he", "she", "it", "his", "her", "their", "they", "them", "him", "this", "that", "these", "those"}
+            semantic_triggers = {"send", "email", "message", "whatsapp", "post", "share", "do", "explain", "repeat"}
+            
+            words = user_input.lower().split()
+            has_pronoun = bool(pronouns & set(words))
+            
+            # Smart check: if short query starts with a semantic trigger, it's likely a follow-up
+            has_trigger = len(words) <= 5 and words[0] in semantic_triggers
+            
+            if not has_pronoun and not has_trigger:
                 return user_input  # Already clear — zero API cost
 
             try:
-                print("🔄 Contextualizing query via Groq...")
+                print("🔄 Contextualizing query via Groq (Smart Resolution)...")
                 rewrite_prompt = (
-                    f"Rewrite this query to be self-contained by replacing pronouns with actual names from context.\n"
-                    f"Output ONLY the rewritten query, nothing else.\n\n"
-                    f"Context:\n{history_text}\n\n"
-                    f"Query: {user_input}\n"
-                    f"Rewritten:"
+                    f"Rewrite the USER QUERY to be self-contained by resolving pronouns (this, it, he, etc.) "
+                    f"or implied subjects based on the RECENT CONVERSATION.\n"
+                    f"If the query is 'send this', find what 'this' refers to in the context and specify it.\n"
+                    f"Output ONLY the rewritten query. No prose.\n\n"
+                    f"RECENT CONVERSATION:\n{history_text}\n\n"
+                    f"USER QUERY: {user_input}\n"
+                    f"REWRITTEN:"
                 )
                 refined = self.groq._call_groq(
                     prompt=rewrite_prompt,

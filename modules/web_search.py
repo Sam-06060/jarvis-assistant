@@ -25,17 +25,16 @@ from bs4 import BeautifulSoup
 class WebSearch:
     def __init__(self):
         """Initialize Search Engines"""
-        self.ddgs = DDGS() if DDGS else None
-        
+        # We'll instantiate per-request for DDGS to be safer with sessions
         if not any([DDGS, google_search, wikipedia]):
             logger.warning("⚠️ No web search libraries found! Web search will not work.")
 
     def search(self, query, max_results=5):
         """
-        Robust search with fallback: DDG -> Google -> Manual Scraper -> Wikipedia
+        Robust search with fallback: DDG -> Google -> Yahoo (Scraper) -> Wikipedia
         Returns a formatted string context.
         """
-        # Clean conversational fluff from the query to improve search accuracy
+        # Clean conversational fluff
         fluff_phrases = [
             "do you know ", "do you have information about ", "can you tell me ",
             "tell me ", "find out ", "search for ", "what is the ", "who is the "
@@ -44,40 +43,40 @@ class WebSearch:
         for fluff in fluff_phrases:
             if clean_query.startswith(fluff):
                 clean_query = clean_query[len(fluff):].strip()
-        # If we stripped everything, revert to the original query
+        
         if len(clean_query) < 2:
             clean_query = query
+
+        # 0. SIRI-LIKE INSTANT DATA FAST PATH
+        try:
+            from modules.live_data_service import LiveDataService
+            instant_market_data = LiveDataService.resolve_market_data(clean_query)
+            if instant_market_data:
+                logger.info(f"⚡ Instant Live Data Pre-empted Search: {instant_market_data}")
+                return f"--- EXACT LIVE DATA ---\n{instant_market_data}\n-----------------------"
+        except Exception as e:
+            logger.debug(f"Instant Data Resolver skip: {e}")
 
         results = []
         source_used = "None"
         
+        # Determine if we are looking for real-time/volatile data
+        is_live_query = any(kw in clean_query.lower() for kw in ["live", "rate", "price", "stock", "weather", "today", "now", "current"])
+
         # 1. Try DuckDuckGo (Primary)
-        if self.ddgs:
+        if DDGS:
             logger.info(f"🔍 Searching DuckDuckGo: '{clean_query}'")
             try:
-                # Fetch more results to allow filtering
-                ddg_results = self.ddgs.text(clean_query, max_results=max_results + 3)
+                with DDGS() as ddgs:
+                    ddg_results = list(ddgs.text(clean_query, max_results=max_results + 2))
                 
                 if ddg_results:
-                    filtered_count = 0
-                    for res in ddg_results:
-                        if filtered_count >= max_results: break
-                        
+                    for res in ddg_results[:max_results]:
                         title = res.get('title', 'No Title')
                         url = res.get('href', '#')
                         body = res.get('body', '')
-                        if not body: body = res.get('snippet', '')
-                        
-                        # QUALITY FILTER
-                        if len(body) < 40: continue # Skip empty/short snippets
-                        if "login" in title.lower() or "sign up" in title.lower(): continue # Skip generic pages
-                        
                         results.append(f"Title: {title}\nURL: {url}\nSummary: {body}")
-                        filtered_count += 1
-                        
                     source_used = "DuckDuckGo"
-                else:
-                    logger.info("⚠️ DuckDuckGo returned no results.")
             except Exception as e:
                 logger.error(f"⚠️ DuckDuckGo failed: {e}")
         
@@ -85,81 +84,46 @@ class WebSearch:
         if not results and google_search:
             logger.info(f"🔍 Switch to Google Search: '{clean_query}'")
             try:
-                # Try simple iterator
-                g_results = list(google_search(clean_query, num_results=max_results, advanced=True))
+                g_results = list(google_search(clean_query, num_results=max_results, advanced=True, timeout=10))
                 if g_results:
                     for res in g_results:
                          results.append(f"Title: {res.title}\nURL: {res.url}\nSummary: {res.description}")
                     source_used = "Google"
-                else:
-                    logger.info("⚠️ Google Search returned no results.")
             except Exception as e:
-                logger.error(f"⚠️ Google Search failed: {e}")
-                # Fallback to simple URL fetch if needed? No, without summary it's useless for LLM.
+                logger.debug(f"⚠️ Google failed: {e}")
 
-        # 3. Manual Fallback (Scraper) - If libs fail, try direct request
+        # 3. Yahoo Scraper (Fallback 2 - High Reliability for Rates/Prices)
         if not results:
             try:
-                logger.info(f"🔍 Switch to Manual Scraper (DuckDuckGo HTML)...")
-                import requests
-                from bs4 import BeautifulSoup
-                
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36"
-                }
-                # Use DDG HTML endpoint directly
-                url = f"https://html.duckduckgo.com/html/?q={clean_query}"
-                resp = requests.get(url, headers=headers, timeout=5)
-                
+                logger.info(f"🔍 Switch to Yahoo Scraper: '{clean_query}'")
+                headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+                y_url = f"https://search.yahoo.com/search?p={requests.utils.quote(clean_query)}"
+                resp = requests.get(y_url, headers=headers, timeout=10)
                 if resp.status_code == 200:
                     soup = BeautifulSoup(resp.text, 'html.parser')
-                    # DDG HTML Structure: .result -> .result__title -> a (link), .result__snippet (body)
-                    for result in soup.select('.result')[:max_results]:
-                        title_tag = result.select_one('.result__title a')
-                        snippet_tag = result.select_one('.result__snippet')
-                        
-                        if title_tag and snippet_tag:
-                            title = title_tag.get_text(strip=True)
-                            link = title_tag['href']
-                            snippet = snippet_tag.get_text(strip=True)
-                            results.append(f"Title: {title}\nURL: {link}\nSummary: {snippet}")
-                    
+                    for div in soup.select('div.compTitle h3.title a')[:max_results]:
+                        title = div.get_text()
+                        link = div.get('href')
+                        results.append(f"Title: {title}\nURL: {link}\nSummary: [Link result]")
                     if results:
-                        source_used = "Manual Scraper (DDG)"
-                    else:
-                        logger.warning("⚠️ Manual Scraper found no parsing matches.")
-                else:
-                    logger.warning(f"⚠️ Manual Request failed: {resp.status_code}")
+                        source_used = "Yahoo"
             except Exception as e:
-                logger.error(f"⚠️ Manual Scraper failed: {e}")
+                logger.debug(f"⚠️ Yahoo scraper failed: {e}")
 
-        # 4. Try Wikipedia (Last Resort)
-        if not results and wikipedia:
+        # 4. Try Wikipedia (Last Resort - NOT for live data)
+        if not results and wikipedia and not is_live_query:
             try:
-                # Cleanup query for better Wiki matches
-                # Don't strip "current" - it helps find incumbent/list pages
                 clean_wiki_query = clean_query.replace("the", "").strip()
-                if len(clean_wiki_query) < 4: clean_wiki_query = clean_query # Revert if too short
-                
                 logger.info(f"🔍 Switch to Wikipedia: '{clean_wiki_query}'")
                 wiki_res = wikipedia.search(clean_wiki_query)
-                
                 if wiki_res:
-                    # Fetch top 2 results
-                    top_matches = wiki_res[:2]
-                    for match in top_matches:
+                    for match in wiki_res[:2]:
                         try:
-                            # Verify relevance: Skip "Office" pages if looking for people? (Hard to generalize)
                             page_content = wikipedia.summary(match, sentences=4)
                             results.append(f"Source: Wikipedia ({match})\nSummary: {page_content}")
                         except: continue
-                    
                     if results:
                         source_used = "Wikipedia"
-                    else:
-                         logger.info("⚠️ Wikipedia extraction failed for candidates.")
-                else:
-                    logger.info("⚠️ Wikipedia search returned no results.")
             except Exception as e:
                 logger.error(f"⚠️ Wikipedia failed: {e}")
 
@@ -181,13 +145,13 @@ class WebSearch:
             headers = {
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36"
             }
-            resp = requests.get(url, headers=headers, timeout=10)
+            resp = requests.get(url, headers=headers, timeout=15)
             
             # Auto-fallback to Jina if standard fetch is blocked (403, 401, etc)
             if resp.status_code in [403, 401, 429] and not url.startswith("https://r.jina.ai/"):
                 logger.info(f"🔄 Blocked ({resp.status_code}). Retrying via Jina Reader...")
                 jina_url = f"https://r.jina.ai/{url}"
-                resp = requests.get(jina_url, headers=headers, timeout=12)
+                resp = requests.get(jina_url, headers=headers, timeout=15)
 
             if resp.status_code != 200:
                 return f"Error: Received status code {resp.status_code} from {url}"

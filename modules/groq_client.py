@@ -54,10 +54,16 @@ class GroqClient:
         self.groq_max_tokens = getattr(config, "GROQ_MAX_TOKENS", 8192)
         
         # OpenRouter (Primary Code Generation)
-        self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "") or getattr(config, "OPENROUTER_API_KEY", "")
-        self.openrouter_model = getattr(config, "OPENROUTER_MODEL", "stepfun/step-3.5-flash:free")
-        self.openrouter_url = getattr(config, "OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
-        self.openrouter_max_tokens = getattr(config, "OPENROUTER_MAX_TOKENS", 32000)
+        # self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "") or getattr(config, "OPENROUTER_API_KEY", "")
+        # self.openrouter_model = getattr(config, "OPENROUTER_MODEL", "stepfun/step-3.5-flash:free")
+        # self.openrouter_url = getattr(config, "OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
+        # self.openrouter_max_tokens = getattr(config, "OPENROUTER_MAX_TOKENS", 32000)
+
+        # NVIDIA CONFIG (Agentic Mode Override using the OpenRouter integration path)
+        self.openrouter_api_key = os.getenv("NVIDIA_API_KEY", "") or getattr(config, "NVIDIA_API_KEY", "")
+        self.openrouter_model = getattr(config, "NVIDIA_MODEL", "qwen/qwen2.5-coder-32b-instruct")
+        self.openrouter_url = getattr(config, "NVIDIA_URL", "https://integrate.api.nvidia.com/v1/chat/completions")
+        self.openrouter_max_tokens = getattr(config, "NVIDIA_MAX_TOKENS", 1024)
         
         # Gemini (Optional)
         self.gemini_api_key = os.getenv("GEMINI_API_KEY", "") or getattr(config, "GEMINI_API_KEY", "")
@@ -251,6 +257,8 @@ class GroqClient:
         for attempt in range(max_retries):
             try:
                 logger.info(f"🌐 [OpenRouter] Requesting {target_model} [Attempt {attempt+1}/{max_retries}]...")
+                logger.info(f"🌐 [OpenRouter] URL: {self.openrouter_url}")
+                logger.debug(f"🌐 [OpenRouter] Payload: {json.dumps(payload, indent=2)}")
                 
                 start_time = time.time()
                 response = self.session.post(
@@ -460,8 +468,8 @@ class GroqClient:
         if api_key.startswith("gsk_"):
             return "groq"
         
-        # OpenRouter usually starts with sk-or-v1- or sk-
-        if api_key.startswith("sk-or-v1-") or (api_key.startswith("sk-") and len(api_key) > 40):
+        # OpenRouter usually starts with sk-or-v1- or sk- (Added nvapi- for NVIDIA)
+        if api_key.startswith("sk-or-v1-") or (api_key.startswith("sk-") and len(api_key) > 40) or api_key.startswith("nvapi-"):
             return "openrouter"
             
         # Gemini usually starts with AIzaSy

@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
 PYTHON_BIN="${ROOT_DIR}/.venv/bin/python3"
+LAUNCHER="${ROOT_DIR}/scripts/launch_backend_from_app.sh"
 APP_BUNDLE="${JARVIS_APP_BUNDLE:-/Applications/Jarvis.app}"
 BACKEND_LOG="${ROOT_DIR}/logs/backend_console.log"
 PID_FILE="${ROOT_DIR}/.jarvis_backend.pid"
@@ -17,12 +18,17 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$LAUNCHER" ]]; then
+  echo "❌ Missing backend launcher: $LAUNCHER"
+  exit 1
+fi
+
 echo "🚀 Starting Jarvis backend..."
 
 if lsof -iTCP:8492 -sTCP:LISTEN >/dev/null 2>&1; then
   echo "ℹ️ Port 8492 already in use. Reusing existing backend."
 else
-  "$PYTHON_BIN" -u jarvis.py --api >>"$BACKEND_LOG" 2>&1 &
+  /bin/bash "$LAUNCHER" >>"$BACKEND_LOG" 2>&1 &
   BACKEND_PID=$!
   echo "$BACKEND_PID" > "$PID_FILE"
 

@@ -2,6 +2,14 @@ from .base import Skill
 import datetime
 
 class TimeSkill(Skill):
+    # Domains that make this a compound query — yield to AgentCore so ALL parts get answered
+    _COMPOUND_SIGNALS = [
+        "weather", "temperature", "forecast", "humidity", "rain",
+        "news", "headline", "stock", "price", "email", "message",
+        "remind", "alarm", "schedule", "play", "search", "find", "open",
+        "translate", "calculate", "convert",
+    ]
+
     def can_handle(self, command: str) -> bool:
         cmd = command.lower()
         
@@ -10,7 +18,15 @@ class TimeSkill(Skill):
             return False
 
         triggers = ["time", "date", "day is it"]
-        return any(t in cmd for t in triggers)
+        if not any(t in cmd for t in triggers):
+            return False
+
+        # GUARD: If the query also asks about OTHER domains, let AgentCore handle the whole thing
+        # so every part of the question gets answered, not just the time.
+        if any(s in cmd for s in self._COMPOUND_SIGNALS):
+            return False
+
+        return True
 
     def handle(self, command: str) -> bool:
         cmd = command.lower()

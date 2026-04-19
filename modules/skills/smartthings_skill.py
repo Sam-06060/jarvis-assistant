@@ -86,10 +86,10 @@ PATTERNS = [
 
     # AC_STATUS
     (INTENT_AC_STATUS, re.compile(
-        r"\b(ac\s+status|status\s+of\s+ac|how's\s+the\s+ac|what's\s+the\s+ac|ac\s+report)\b"
+        r"\b(ac\s+status|status\s+of\s+ac|how'?s\s+the\s+ac|what'?s\s+the\s+ac|ac\s+report)\b"
         r"|\b(is\s+the\s+ac\s+(on|off|running|online|offline))\b"
         r"|\bgive\s+me\s+(a\s+)?report\s+(for|on)\s+(the\s+)?ac\b"
-        r"|\b(what's|what\s+is|tell\s+me\s+the).*(current\s+)?(room\s+)?temperature\b"
+        r"|\b(what'?s|what\s+is|tell\s+me\s+the).*(current\s+)?(room\s+)?(temperature|temp)\b"
         r"|\bhow\s+is\s+the\s+ac\s+doing\b",
         re.IGNORECASE
     )),

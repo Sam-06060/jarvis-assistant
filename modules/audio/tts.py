@@ -84,6 +84,7 @@ class TextToSpeech:
             except Exception as e:
                 logger.debug(f"Audio device check failed: {e}")
                 
+        cmd.append("--")
         cmd.append(text)
 
         max_retries = 2

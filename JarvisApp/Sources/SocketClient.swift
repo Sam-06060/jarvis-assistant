@@ -4,6 +4,7 @@ import Combine
 #if canImport(AppKit)
 import AppKit
 #endif
+import CoreLocation
 
 struct JarvisMessage: Identifiable, Codable, Hashable {
     var id = UUID()
@@ -17,6 +18,42 @@ struct JarvisMessage: Identifiable, Codable, Hashable {
     }
 }
 
+enum HeartbeatStatus: String {
+    case active
+    case success
+    case failed
+    case thinking
+    case clear
+}
+
+struct HeartbeatStep: Identifiable {
+    let id = UUID()
+    let label: String
+    let status: HeartbeatStatus
+    let stepIndex: Int
+    let totalSteps: Int
+    let timestamp: Date
+}
+
+// Plan Mode payload received from Python via plan_render socket message
+struct PlanStepPayload: Identifiable, Decodable {
+    var id: Int { number }
+    let number: Int
+    let title: String
+    let description: String
+    let tool: String
+    let expected_output: String
+}
+
+struct PlanPayload: Decodable {
+    let task_id: String
+    let project_slug: String
+    let goal: String
+    let steps: [PlanStepPayload]
+    let status: String
+    let plan_md_path: String
+}
+
 class SocketClient: ObservableObject {
     @Published var isConnected = false
     @Published var messages: [JarvisMessage] = []
@@ -25,6 +62,8 @@ class SocketClient: ObservableObject {
     @Published var isFlashOverlayVisible: Bool = false
     @Published var isAgenticModeEnabled: Bool = false
     @Published var isAgenticModeTransitionPending: Bool = false
+    @Published var heartbeatSteps: [HeartbeatStep] = []
+    @Published var pendingPlan: PlanPayload? = nil   // non-nil when plan_render arrives
 
     // Injected reference to the native AC hardware bridge.
     // Set by JarvisApp after both objects are initialised.
@@ -174,6 +213,28 @@ class SocketClient: ObservableObject {
         }))
     }
     
+    // NEW: Sandboxed Terminal Approval Response
+    func sendApprovalResponse(id: String, approved: Bool) {
+        let json: [String: Any] = ["type": "approval_response", "id": id, "approved": approved]
+        guard let data = try? JSONSerialization.data(withJSONObject: json) else { return }
+        let payload = data + "\n".data(using: .utf8)!
+        
+        connection?.send(content: payload, completion: .contentProcessed({ error in
+            if let error = error { print("Send Error (Approval): \(error)") }
+        }))
+    }
+
+    // Plan Mode: send approval or rejection back to Python
+    func sendPlanApproval(taskId: String, approved: Bool) {
+        let json: [String: Any] = ["type": "plan_approval", "task_id": taskId, "approved": approved]
+        guard let data = try? JSONSerialization.data(withJSONObject: json) else { return }
+        let payload = data + "\n".data(using: .utf8)!
+        connection?.send(content: payload, completion: .contentProcessed({ error in
+            if let error = error { print("Send Error (PlanApproval): \(error)") }
+        }))
+        DispatchQueue.main.async { self.pendingPlan = nil }
+    }
+    
     private func receive() {
         // Read line by line is hard with NWConnection, it gives chunks.
         // We will read a stream and look for newlines. 
@@ -203,8 +264,57 @@ class SocketClient: ObservableObject {
             let line = String(buffer[..<range.lowerBound])
             buffer.removeSubrange(...range.lowerBound)
             
-            if let jsonData = line.data(using: .utf8),
-               let msg = try? JSONDecoder().decode(JarvisMsgRaw.self, from: jsonData) {
+            if let jsonData = line.data(using: .utf8) {
+                // ── PLAN RENDER (separate decode path) ───────────────────
+                if line.contains("\"plan_render\""),
+                   let pr = try? JSONDecoder().decode(PlanRenderMsgRaw.self, from: jsonData),
+                   pr.type == "plan_render" {
+                    DispatchQueue.main.async {
+                        self.pendingPlan = pr.plan
+                    }
+                    continue
+                }
+
+                // ── HEARTBEAT MESSAGES (separate decode path) ────────────
+                if line.contains("\"heartbeat\""),
+                   let hb = try? JSONDecoder().decode(HeartbeatMsgRaw.self, from: jsonData),
+                   hb.type == "heartbeat" {
+                    DispatchQueue.main.async {
+                        let status = HeartbeatStatus(rawValue: hb.status) ?? .active
+                        if status == .clear {
+                            self.heartbeatSteps.removeAll()
+                            return
+                        }
+                        guard !hb.label.isEmpty else { return }
+
+                        let step = HeartbeatStep(
+                            label: hb.label,
+                            status: status,
+                            stepIndex: hb.step_index,
+                            totalSteps: hb.total_steps,
+                            timestamp: Date()
+                        )
+
+                        // 3-Slot Status Model (Senior Architect UI)
+                        // index 0: Mode/System Header
+                        // index 1: Major Plan Step
+                        // index 2: Live Action Detail
+                        if let idx = self.heartbeatSteps.firstIndex(where: { $0.stepIndex == hb.step_index }) {
+                            self.heartbeatSteps[idx] = step
+                        } else {
+                            self.heartbeatSteps.append(step)
+                            // Keep max 3 slots to prevent UI overflow
+                            if self.heartbeatSteps.count > 3 {
+                                self.heartbeatSteps.removeFirst()
+                            }
+                            // Re-sort ensure indices 0, 1, 2 order
+                            self.heartbeatSteps.sort(by: { $0.stepIndex < $1.stepIndex })
+                        }
+                    }
+                    continue
+                }
+
+               if let msg = try? JSONDecoder().decode(JarvisMsgRaw.self, from: jsonData) {
                 DispatchQueue.main.async {
                     // 1. ADD SHUTDOWN LOGIC HERE
                     if let h = msg.header, h == "OFFLINE" {
@@ -252,12 +362,20 @@ class SocketClient: ObservableObject {
                         self.syncAgenticModeState(header: msg.header, detail: detail)
                     }
                     
+                    if msg.type == "approval_request" {
+                        let fullMsg = JarvisMessage(type: msg.type, header: msg.header, detail: msg.detail, data: msg.data)
+                        self.messages.append(fullMsg)
+                        if self.messages.count > 50 { self.messages.removeFirst() }
+                        return
+                    }
+                    
                     let fullMsg = JarvisMessage(type: msg.type, header: msg.header, detail: msg.detail, data: msg.data)
                     self.messages.append(fullMsg)
                     // Keep history last 50
                     if self.messages.count > 50 { self.messages.removeFirst() }
                 }
-            }
+               } // end if let msg
+            } // end if let jsonData
         }
     }
 
@@ -346,6 +464,32 @@ class SocketClient: ObservableObject {
         }
     }
 
+    
+    // NEW: Natively bridged GPS location pusher (Siri equivalent)
+    func pushLocationCoordinate(_ loc: CLLocation) {
+        guard isConnected else { return }
+        print("📍 [SocketClient] Pushing Native CoreLocation: \(loc.coordinate.latitude), \(loc.coordinate.longitude)")
+        
+        let updates: [[String: Any]] = [
+            ["key": "MAC_LOCATION_LAT", "value": loc.coordinate.latitude],
+            ["key": "MAC_LOCATION_LON", "value": loc.coordinate.longitude]
+        ]
+        
+        for update in updates {
+            if let jsonData = try? JSONSerialization.data(withJSONObject: update),
+               let jsonString = String(data: jsonData, encoding: .utf8) {
+                let text = "__UPDATE_CONFIG__:\(jsonString)"
+                let json: [String: Any] = ["type": "command", "data": text]
+                if let data = try? JSONSerialization.data(withJSONObject: json) {
+                    let payload = data + "\n".data(using: .utf8)!
+                    connection?.send(content: payload, completion: .contentProcessed({ error in
+                        if let error = error { print("Send Error (Location): \(error)") }
+                    }))
+                }
+            }
+        }
+    }
+
 } // end SocketClient
 
 // Helper strict struct for decoding
@@ -354,4 +498,17 @@ struct JarvisMsgRaw: Decodable {
     let header: String?
     let detail: String?
     let data: String?
+}
+
+struct HeartbeatMsgRaw: Decodable {
+    let type: String
+    let label: String
+    let status: String
+    let step_index: Int
+    let total_steps: Int
+}
+
+struct PlanRenderMsgRaw: Decodable {
+    let type: String
+    let plan: PlanPayload
 }
