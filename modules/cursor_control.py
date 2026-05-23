@@ -185,11 +185,21 @@ class CursorController:
 
     def start(self):
         cap = cv2.VideoCapture(config.CURSOR_CAMERA_INDEX)
-        cap.set(3, 640) 
+        cap.set(3, 640)
         cap.set(4, 480)
-        
+
         logger.info("🚀 Fluid Gesture Engine Active.")
-        
+
+        # Try to create a display window up-front on the main thread.
+        # On macOS, cv2.imshow() requires a Cocoa run-loop; if it isn't available
+        # (headless CI, wrong thread, etc.) we fall back to gesture-only mode.
+        _headless = False
+        try:
+            cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+        except Exception as _win_err:
+            logger.warning(f"⚠️ Cannot open display window ({_win_err}). Running in headless gesture mode.")
+            _headless = True
+
         exit_status = "NORMAL_EXIT"
         
         try:
@@ -351,18 +361,44 @@ class CursorController:
                             self.prev_scroll_x = 0
                             if self.is_dragging: pyautogui.mouseUp(); self.is_dragging = False
 
-                cv2.imshow(self.window_name, img)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
+                if not _headless:
+                    try:
+                        cv2.imshow(self.window_name, img)
+                        if cv2.waitKey(1) & 0xFF == ord('q'):
+                            break
+                    except Exception as _disp_err:
+                        # cv2.imshow threw a C++ / NSException — switch to headless
+                        logger.warning(f"⚠️ Display error ({_disp_err}). Switching to headless gesture mode.")
+                        _headless = True
         
         except StopIteration:
             pass
         except Exception as e:
             logger.error(f"Cursor Error: {e}")
         finally:
-            if self.is_dragging: pyautogui.mouseUp()
-            if cap.isOpened(): cap.release()
-            cv2.destroyAllWindows()
-            for _ in range(5): cv2.waitKey(1)
-            
+            # Release mouse if still held
+            if self.is_dragging:
+                pyautogui.mouseUp()
+
+            # Release camera FIRST so macOS AVFoundation can start its async teardown
+            if cap.isOpened():
+                cap.release()
+
+            # Destroy OpenCV windows only when we were in visual mode
+            if not _headless:
+                try:
+                    cv2.destroyWindow(self.window_name)
+                    # Pump the Cocoa event queue so the window actually closes
+                    for _ in range(5):
+                        cv2.waitKey(1)
+                except Exception:
+                    pass  # Window may already be gone
+
+            # ── Camera release cooldown ──────────────────────────────────────
+            # macOS AVFoundation session teardown is asynchronous.  Give it
+            # ~600 ms before any subsequent camera user (e.g. FaceID) tries
+            # to open the same device, otherwise they get a silent timeout.
+            import time as _time
+            _time.sleep(0.6)
+
         return exit_status

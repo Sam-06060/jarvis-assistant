@@ -1,4 +1,5 @@
 import pyaudio
+import collections
 import time
 import wave
 import struct
@@ -47,6 +48,13 @@ class AudioRecorder:
         self.last_record_status = "idle"
         self.consecutive_read_failures = 0
         self.input_device_index = None
+        self._last_reinit_time = 0  # debounce guard for rapid hot-swaps
+        self._reinit_lock = threading.Lock()
+
+        # Rolling buffer: retains the last ~2 seconds of raw PCM data.
+        # Used by Voice ID to verify the speaker who triggered the wake word.
+        # 2s × 16000 Hz / 512 samples per chunk ≈ 62 chunks
+        self._rolling_buffer = collections.deque(maxlen=62)
         
         # Initialize PyAudio
         self._init_audio()
@@ -83,17 +91,54 @@ class AudioRecorder:
         logger.critical("Failed to init PyAudio")
 
     def _reinit_audio_system(self):
-        """Completely restart PortAudio to pick up new default devices after a disconnect."""
-        logger.warning("🔄 Re-initializing Audio System (Device change/disconnect detected)...")
-        self.close_stream()
-        if self.pa:
-            try:
-                self.pa.terminate()
-            except Exception: pass
-            self.pa = None
-        time.sleep(0.5)
-        self._init_audio()
-        self.consecutive_read_failures = 0
+        """Completely restart PortAudio to pick up new default devices after a disconnect.
+        Debounced: ignores rapid successive calls within 2s and only runs the latest."""
+        if not self._reinit_lock.acquire(blocking=False):
+            # Another reinit is already in progress — skip
+            logger.debug("🔄 Reinit already in progress, skipping duplicate")
+            return
+        try:
+            now = time.time()
+            # Debounce: if another reinit just happened, wait a bit for device enumeration to settle
+            elapsed_since_last = now - self._last_reinit_time
+            if elapsed_since_last < 2.0:
+                settle_time = 2.0 - elapsed_since_last
+                logger.debug(f"🔄 Debouncing reinit — waiting {settle_time:.1f}s for device settle")
+                time.sleep(settle_time)
+                # Check if ANOTHER reinit was requested during the wait (latest config wins)
+                # The needs_reinit flag will be re-read on the next read_chunk call
+
+            logger.warning("🔄 Re-initializing Audio System (Device change/disconnect detected)...")
+            self.close_stream()
+            if self.pa:
+                try:
+                    self.pa.terminate()
+                except Exception: pass
+                self.pa = None
+            time.sleep(0.5)
+            self._init_audio()
+            self.consecutive_read_failures = 0
+            self._last_reinit_time = time.time()
+
+            # Force re-open stream and validate it's alive
+            stream = self.open_stream()
+            if stream:
+                try:
+                    # Flush stale buffer and do a validation read
+                    avail = stream.get_read_available()
+                    if avail > 0:
+                        stream.read(avail, exception_on_overflow=False)
+                    logger.info("✅ Audio stream re-opened and validated after hot-swap")
+                except Exception as e:
+                    logger.warning(f"⚠️ Post-reinit stream validation failed: {e}")
+                    # One more attempt — full teardown + rebuild
+                    self.close_stream()
+                    time.sleep(0.3)
+                    self.open_stream()
+            else:
+                logger.error("❌ Failed to re-open audio stream after reinit")
+        finally:
+            self._reinit_lock.release()
 
     def open_stream(self):
         """Opens audio stream if not open"""
@@ -194,6 +239,7 @@ class AudioRecorder:
                 return None
 
             self.consecutive_read_failures = 0
+            self._rolling_buffer.append(data)
             return data
 
         except IOError as e:
@@ -213,6 +259,24 @@ class AudioRecorder:
             else:
                 time.sleep(0.1)
             return None
+
+    def get_recent_audio(self, duration_seconds: float = 2.0) -> bytes:
+        """Return the last N seconds of raw PCM audio from the rolling buffer.
+
+        Used by Voice ID to verify the speaker who triggered the wake word.
+        The buffer is always filling, so this is a zero-latency snapshot.
+
+        Args:
+            duration_seconds: How many seconds of audio to return (max 2.0).
+
+        Returns:
+            Raw 16-bit PCM bytes.
+        """
+        chunks_needed = int(duration_seconds * self.rate / self.chunk)
+        # Take the most recent N chunks (or all available)
+        buffer_list = list(self._rolling_buffer)
+        recent = buffer_list[-chunks_needed:] if len(buffer_list) >= chunks_needed else buffer_list
+        return b''.join(recent)
 
     def record_until_silence(self, max_duration=30, silence_threshold=0.6, hud_queue=None):
         """

@@ -29,6 +29,14 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Pin the ONNX model to a local project directory so it's cached permanently.
+# fastembed defaults to ~/.cache/fastembed which is not guaranteed to persist.
+_MODEL_CACHE_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..", "data", "models", "fastembed"
+)
+os.makedirs(_MODEL_CACHE_DIR, exist_ok=True)
+
 _CACHE_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "..", "data", "semantic_cache.npz"
@@ -92,6 +100,40 @@ class SemanticRouter:
         )
         self._init_thread.start()
         logger.info("🧠 [SemanticRouter] Background indexing started...")
+
+    def warm_boot(self) -> bool:
+        """
+        Instant warm boot path — loads the .npz cache directly, no fastembed model needed.
+        Called instead of boot() when BootCacheManager confirms a warm boot.
+
+        Returns True if cache loaded, False if caller should fall back to normal boot().
+        """
+        if self._ready:
+            return True
+
+        cache_path = os.path.normpath(_CACHE_FILE)
+        try:
+            if not os.path.exists(cache_path):
+                logger.info("🧊 [SemanticRouter] No .npz cache — warm_boot() skipped.")
+                return False
+
+            t0 = time.time()
+            data = np.load(cache_path, allow_pickle=True)
+            self._matrix = data["matrix"]
+            self._ids = list(data["ids"])
+            self._registry_hash = str(data.get("registry_hash", ""))
+            self._ready = True
+            elapsed_ms = int((time.time() - t0) * 1000)
+            logger.info(
+                f"⚡ [SemanticRouter] Warm boot in {elapsed_ms}ms — "
+                f"{len(self._ids)} playbooks ready."
+            )
+            return True
+        except Exception as e:
+            logger.warning(
+                f"⚠️ [SemanticRouter] Warm boot failed ({e}) — falling back to background init."
+            )
+            return False
 
     def search(self, query: str, top_k: int = 10, threshold: float = 0.65) -> Optional[List[Tuple[str, float]]]:
         """
@@ -214,14 +256,18 @@ class SemanticRouter:
             return False
 
     def _load_model(self) -> None:
-        """Lazy-load the fastembed model (downloads ~30MB ONNX file on first use)."""
+        """Lazy-load the fastembed model from local project cache.
+        
+        Uses data/models/fastembed/ as cache_dir so the ONNX file is stored
+        alongside the project and never re-downloaded on subsequent boots.
+        """
         if self._model is not None:
             return
         if TextEmbedding is None:
             raise RuntimeError("FastEmbed library not found. Install it for semantic routing.")
         try:
-            logger.info(f"📦 [SemanticRouter] Loading model: {_MODEL_NAME}")
-            self._model = TextEmbedding(model_name=_MODEL_NAME)
+            logger.info(f"📦 [SemanticRouter] Loading model: {_MODEL_NAME} (cache: {_MODEL_CACHE_DIR})")
+            self._model = TextEmbedding(model_name=_MODEL_NAME, cache_dir=_MODEL_CACHE_DIR)
             logger.info("✅ [SemanticRouter] Model loaded.")
         except Exception as e:
             raise RuntimeError(f"Failed to initialize fastembed model: {e}")

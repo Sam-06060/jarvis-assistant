@@ -47,7 +47,7 @@ class ShortcutsSkill(Skill):
                     # We need to ensure 'command_processor' is in context.
                     proc = self.app.get('command_processor')
                     if proc:
-                        proc.process(sub)
+                        proc.process(sub, from_routine=True)
                     time.sleep(0.5)
                 return True
 

@@ -29,9 +29,15 @@ class WakeWordEngine:
             # We don't exit here, we let the caller decide, but we mark failure
             self.porcupine = None
 
+
+
     def process(self, pcm_data):
         """
         Process a chunk of audio PCM data.
+        
+        Gate 1: Cobra VAD — is this human speech?
+        Gate 2: Porcupine — did someone say "Jarvis"?
+        
         Returns: True if wake word detected, False otherwise.
         """
         if not self.porcupine:
@@ -41,14 +47,14 @@ class WakeWordEngine:
             if not pcm_data:
                 return False
                 
-            # Unpack bytes to shorts (required by Porcupine)
-            # Ensure proper length
+            # Unpack bytes to shorts (required by both Cobra and Porcupine)
             num_samples = len(pcm_data) // 2
             if num_samples != self.frame_length:
-                # logger.warning(f"WakeFrame Size Mismatch: {num_samples} vs {self.frame_length}")
                 return False
                 
             pcm_unpacked = struct.unpack_from("h" * self.frame_length, pcm_data)
+
+            # Porcupine wake word detection
             keyword_index = self.porcupine.process(pcm_unpacked)
             
             return keyword_index >= 0
@@ -67,3 +73,4 @@ class WakeWordEngine:
     def cleanup(self):
         if self.porcupine:
             self.porcupine.delete()
+

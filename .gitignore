@@ -41,3 +41,6 @@ Thumbs.db
 JarvisApp/.build/
 JarvisApp/.swiftpm/
 DerivedData/
+data/.boot_cache/*.pkl
+data/.boot_cache/*.json
+data/.boot_cache/*.tmp

@@ -34,8 +34,8 @@ class SandboxWriteFileTool(AgentTool):
     description = (
         "Write content to a file. Relative paths go to the sandbox; "
         "absolute paths go directly. "
-        "Input: {'path': str, 'content': str}. "
-        "Example: {'path': 'src/app.py', 'content': '...'}"
+        "Input: {'file_path': str, 'content': str}. "
+        "Example: {'file_path': '/Users/me/Desktop/notes.txt', 'content': '...'}"
     )
     permission = "write"
 
@@ -48,7 +48,7 @@ class SandboxWriteFileTool(AgentTool):
     )
 
     def run(self, inp: dict) -> str:
-        raw_path = inp.get("path", "").strip()
+        raw_path = (inp.get("path") or inp.get("file_path") or "").strip()
         content = inp.get("content", "")
 
         if not raw_path:

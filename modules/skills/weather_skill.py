@@ -33,11 +33,16 @@ class WeatherSkill(Skill):
                 extracted = brain.ask(prompt, system_prompt="You are a strict data extractor. Follow rules exactly.")
                 if extracted:
                     extracted_clean = extracted.strip()
+                    # Guard: if brain returned a conversational paragraph instead of
+                    # a city name, discard it and fall back to current location
+                    if len(extracted_clean.split()) > 6:
+                        logger.debug(f"WeatherSkill: extraction too verbose, using current location")
+                        extracted_clean = "CURRENT_LOCATION"
                     # Clean up random AI chatter
                     for prefix in ["location:", "city:"]:
                         if extracted_clean.lower().startswith(prefix):
                             extracted_clean = extracted_clean[len(prefix):].strip()
-                            
+
                     if "CURRENT_LOCATION" in extracted_clean.upper() or extracted_clean == "":
                         # He identified it's current location, use Mac coordinates
                         loc_data = weather_service._get_location()

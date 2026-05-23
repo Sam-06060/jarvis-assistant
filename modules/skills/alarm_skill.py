@@ -5,9 +5,15 @@ import re
 class AlarmSkill(Skill):
     def __init__(self, app_context):
         super().__init__(app_context)
-        # We need to import AlarmManager here or get it from context
-        # For now, we assume it's passed in app_context during initialization in commands.py
-        self.alarm_manager = app_context.get('alarm_manager')
+        # Do NOT cache alarm_manager here — it is registered AFTER skills load
+        # (startup race condition). Store the registry for lazy lookup at call time.
+        self._registry = app_context.get('registry')
+
+    def _get_alarm_manager(self):
+        """Lazy lookup — always fetches the real registered AlarmManager instance."""
+        if self._registry:
+            return self._registry.get('alarms')
+        return None
 
     def can_handle(self, command: str) -> bool:
         cmd = command.lower()
@@ -60,10 +66,11 @@ class AlarmSkill(Skill):
             self.speech.speak("What time should I set the alarm for?")
             return True
             
-        if self.alarm_manager:
-            success, message = self.alarm_manager.set_alarm(time_part, label_part)
+        alarm_manager = self._get_alarm_manager()
+        if alarm_manager:
+            success, message = alarm_manager.set_alarm(time_part, label_part)
             self.speech.speak(message)
         else:
-            self.speech.speak("Alarm system is not initialized.")
+            self.speech.speak("Alarm system is not available yet, please try again in a moment.")
             
         return True

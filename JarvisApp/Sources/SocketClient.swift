@@ -173,6 +173,33 @@ class SocketClient: ObservableObject {
             }
         }))
     }
+
+    // NEW: Voice ID (Speaker Verification) Toggle
+    func setVoiceIDEnabled(_ active: Bool) {
+        guard isConnected else {
+            print("⚠️ Ignoring Voice ID toggle while socket is disconnected.")
+            return
+        }
+        
+        let update: [String: Any] = ["key": "ENABLE_VOICE_ID", "value": active]
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: update),
+              let jsonString = String(data: jsonData, encoding: .utf8) else {
+            return
+        }
+        
+        let text = "__UPDATE_CONFIG__:\(jsonString)"
+        let json: [String: Any] = ["type": "command", "data": text]
+        guard let data = try? JSONSerialization.data(withJSONObject: json) else { return }
+        let payload = data + "\n".data(using: .utf8)!
+        
+        connection?.send(content: payload, completion: .contentProcessed({ error in
+            if let error = error {
+                print("Send Error (VoiceID): \(error)")
+            } else {
+                print("🔒 Requested Voice ID -> \(active ? "ON" : "OFF")")
+            }
+        }))
+    }
     
     func send(text: String, webSearch: Bool = false) {
         // 1. Optimistically append user message to UI

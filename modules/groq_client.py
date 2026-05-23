@@ -10,6 +10,8 @@ import requests
 import logging
 import time
 import os
+import threading
+import socket
 import config
 from typing import List, Dict, Any, Optional
 
@@ -116,6 +118,84 @@ class GroqClient:
         # Track connection health
         self._last_success_time = 0
         self._stale_threshold = 30  # seconds idle before connection considered stale
+
+        # ── Circuit Breaker ───────────────────────────────────────────────────
+        # After _failure_threshold consecutive failures the breaker trips and
+        # Jarvis stays on Ollama. It resets the instant Groq is reachable again.
+        self._consecutive_failures = 0
+        self._failure_threshold = 3
+        self._circuit_open = False
+        self._breaker_lock = threading.Lock()
+
+        # Start reactive network observer so recovery is instant (Chrome-style)
+        if self.groq_available:
+            threading.Thread(
+                target=self._start_network_observer,
+                daemon=True,
+                name="GroqNetObserver"
+            ).start()
+
+    # ============================================================
+    # Circuit Breaker API
+    # ============================================================
+
+    def is_healthy(self) -> bool:
+        """Gate call used by brain.py — False when breaker is open."""
+        with self._breaker_lock:
+            return not self._circuit_open
+
+    def _trip_breaker(self):
+        """Open the circuit: stay on Ollama until network recovers."""
+        if not self._circuit_open:  # only log on state change
+            self._circuit_open = True
+            logger.error(
+                "🔴 Groq Circuit OPEN — %d consecutive failures. "
+                "Switching permanently to Ollama until network recovers.",
+                self._consecutive_failures
+            )
+
+    def _reset_breaker(self):
+        """Close the circuit: Groq is healthy again."""
+        with self._breaker_lock:
+            if self._circuit_open:
+                logger.info("🟢 Groq Circuit CLOSED — cloud restored.")
+            self._circuit_open = False
+            self._consecutive_failures = 0
+
+    def _probe_groq_health(self) -> bool:
+        """Lightweight health check (used by network observer)."""
+        try:
+            resp = self.session.get(
+                "https://api.groq.com/openai/v1/models",
+                headers={"Authorization": f"Bearer {self.groq_api_key}"},
+                timeout=5
+            )
+            if resp.status_code == 200:
+                self._last_success_time = time.time()
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _start_network_observer(self):
+        """
+        Network recovery observer — polls Groq reachability via safe TCP socket.
+        When the circuit breaker is open, polls every 10s for fast recovery.
+        When healthy, sleeps 30s between checks (near-zero CPU).
+        """
+        logger.info("🌐 Groq: network observer active (socket-poll, 10s recovery)")
+        while True:
+            interval = 10 if self._circuit_open else 30
+            time.sleep(interval)
+            if self._circuit_open:
+                try:
+                    with socket.create_connection(("api.groq.com", 443), timeout=4):
+                        # TCP reachable — do a full API probe
+                        if self._probe_groq_health():
+                            self._reset_breaker()
+                            logger.info("📡 Network restored — Groq back online")
+                except Exception:
+                    pass  # still offline, keep circuit open
 
     def _warmup_connection(self):
         """Pre-establish TCP+TLS connection to Groq."""
@@ -372,20 +452,22 @@ class GroqClient:
         
         max_retries = 3
         base_timeout = 15  # Start with 15s, doubles each retry
-        
+
         for attempt in range(1, max_retries + 1):
             timeout = base_timeout * attempt  # 15s, 30s, 45s
             try:
                 logger.info(f"☁️ [Groq] Requesting {target_model} — Attempt {attempt}/{max_retries} (timeout {timeout}s)...")
                 response = self.session.post(self.groq_url, headers=headers, json=payload, timeout=timeout)
-                
+
                 if response.status_code == 200:
                     data = response.json()
                     content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                    self._last_success_time = time.time()  # Track success
+                    self._last_success_time = time.time()
+                    # ── SUCCESS: reset circuit breaker ────────────────────────
+                    self._reset_breaker()
                     logger.info(f"✅ [Groq] Success: {len(content)} chars (attempt {attempt})")
                     return content
-                
+
                 else:
                     logger.error(f"❌ [Groq] API Error {response.status_code}: {response.text[:500]}")
                     if response.status_code == 429:
@@ -400,22 +482,26 @@ class GroqClient:
                         continue
                     else:
                         return None
-                    
+
             except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
                 error_type = "Timeout" if isinstance(e, requests.exceptions.Timeout) else "Connection Error"
                 logger.warning(f"⚠️ Groq {error_type} (attempt {attempt}/{max_retries})")
-                
                 if attempt < max_retries:
-                    # Dead socket — refresh session immediately, NO wait
                     logger.info("🔄 Refreshing session for clean retry...")
                     self._refresh_session()
                 continue
-                
+
             except Exception as e:
                 logger.error(f"❌ Groq Unexpected Error: {e}")
                 return None
-        
-        logger.error(f"❌ Groq: All {max_retries} attempts failed.")
+
+        # ── ALL RETRIES FAILED: trip the circuit breaker ──────────────────────
+        with self._breaker_lock:
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= self._failure_threshold:
+                self._trip_breaker()
+        logger.error(f"❌ Groq: All {max_retries} attempts failed. "
+                     f"(consecutive failures: {self._consecutive_failures})")
         return None
 
     def _call_gemini(self, prompt, system_prompt=None, model=None):

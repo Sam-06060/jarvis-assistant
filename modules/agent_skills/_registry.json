@@ -146,7 +146,7 @@
         },
         "write_file": {
             "path": "/Users/samsonganta/Desktop/jarvis-assistant/modules/agent_skills/sandbox_tools.py",
-            "description": "Write content to a file. Relative paths go to the sandbox; absolute paths go directly. Input: {'path': str, 'content': str}. Example: {'path': 'src/app.py', 'content': '...'}",
+            "description": "Write content to a file. Relative paths go to the sandbox; absolute paths go directly. Input: {'file_path': str, 'content': str}. Example: {'file_path': '/Users/me/Desktop/notes.txt', 'content': '...'}",
             "type": "python",
             "class_name": "SandboxWriteFileTool"
         },
@@ -11563,5 +11563,5 @@
             "type": "markdown"
         }
     },
-    "last_updated": 1776605709.0
+    "last_updated": 1779569649.0
 }

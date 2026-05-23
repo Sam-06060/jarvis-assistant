@@ -114,11 +114,14 @@ class AutomationSkill(Skill):
                     return True
                 self.speech.speak("Visual interface active.")
                 try:
-                    cursor.start()
+                    cursor.start()  # blocks until user exits (peace gesture or error)
                     self.speech.speak("Cursor control closed.")
                 except Exception as e:
-                    self.logger.error(f"Cursor Runtime Error: {e}")
+                    self.logger.error(f"Cursor Runtime Error: {e}", exc_info=True)
                     self.speech.speak("Visual system error.")
+                # Small yield so the main thread finishes camera teardown
+                # before the active-conversation loop re-checks for a wake.
+                import time as _t; _t.sleep(0.2)
                 return True
 
             status = cp.get_cursor_load_status()
@@ -312,11 +315,14 @@ class AutomationSkill(Skill):
 
         self.speech.speak("Visual interface active.")
         try:
-            cursor.start()
+            cursor.start()  # blocks until user exits (peace gesture or error)
             self.speech.speak("Cursor control closed.")
         except Exception as e:
-            self.logger.error(f"Cursor Runtime Error: {e}")
+            self.logger.error(f"Cursor Runtime Error: {e}", exc_info=True)
             self.speech.speak("Visual system error.")
+        # Small yield after the session so the calling loop doesn't race
+        # FaceID's camera request against AVFoundation teardown.
+        import time as _t; _t.sleep(0.2)
 
     def _extract_inline_summary_target(self, command: str) -> str:
         text = command.strip()

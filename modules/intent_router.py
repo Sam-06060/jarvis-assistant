@@ -47,6 +47,7 @@ class IntentRouter:
     ACTION_SYSTEM_CONTROL          = "SYSTEM_CONTROL"
     ACTION_GENERAL_CONVERSATION    = "GENERAL_CONVERSATION"
     ACTION_AGENTIC_TASK            = "AGENTIC_TASK"
+    ACTION_SKILL_DISPATCH          = "SKILL_DISPATCH"  # skill handles it directly
 
     # Groq config
     _groq_api_key   = getattr(config, "GROQ_API_KEY", "")
@@ -144,14 +145,14 @@ class IntentRouter:
         if re.search(r"\b(brb|be\s+right\s+back|stepping\s+away|going\s+away|take\s+a\s+break)\b", c):
             return self._ok(self.ACTION_SYSTEM_CONTROL, 0.95, "Lock screen NLP")
 
-        # Communication
+        # Communication — still GENERAL_CONVERSATION (brain handles compose/send flow)
         comm_kw = {"message", "text", "whatsapp", "email", "mail", "call", "contact", "send"}
         if unique_words & comm_kw and not ({"build", "create", "make"} & unique_words):
             return self._ok(self.ACTION_GENERAL_CONVERSATION, 0.9, "Communication keyword")
 
-        # Weather
+        # Weather — handled by WeatherSkill (SKILL_DISPATCH lets skill iteration run)
         if (unique_words & {"weather", "forecast", "temperature", "rain", "humidity"}) and not ({"build", "create", "make", "develop"} & unique_words):
-            return self._ok(self.ACTION_GENERAL_CONVERSATION, 0.9, "Weather keyword")
+            return self._ok(self.ACTION_SKILL_DISPATCH, 0.95, "WeatherSkill")
 
         # Time / Date
         # GUARD: compound query mixing time + another domain (e.g. weather, news) must
@@ -163,27 +164,27 @@ class IntentRouter:
             if unique_words & _other_domains:
                 return None  # compound query — let Groq handle the full thing
             if len(unique_words) <= 6:
-                return self._ok(self.ACTION_GENERAL_CONVERSATION, 0.9, "Time/date keyword")
+                return self._ok(self.ACTION_SKILL_DISPATCH, 0.95, "TimeSkill")
 
         # Alarms / Reminders
         if re.search(r"\b(set\s+(alarm|reminder|timer)|wake\s+me\s+up|remind\s+me)\b", c):
-            return self._ok(self.ACTION_GENERAL_CONVERSATION, 0.9, "Alarm/reminder keyword")
+            return self._ok(self.ACTION_SKILL_DISPATCH, 0.95, "AlarmSkill / ReminderSkill")
 
         # Calculator
         if re.search(r"\b(calculate|compute|convert|tip|percent|math)\b", c):
-            return self._ok(self.ACTION_GENERAL_CONVERSATION, 0.9, "Calculator keyword")
+            return self._ok(self.ACTION_SKILL_DISPATCH, 0.95, "CalculatorSkill")
 
         # Translator
         if re.search(r"\b(translate|how\s+do\s+you\s+say|how\s+to\s+say)\b", c):
-            return self._ok(self.ACTION_GENERAL_CONVERSATION, 0.9, "Translator keyword")
+            return self._ok(self.ACTION_SKILL_DISPATCH, 0.95, "TranslatorSkill")
 
         # News
         if unique_words & {"news", "headlines"} or (unique_words & {"latest"} and unique_words & {"news", "headlines", "stories", "updates"}):
-            return self._ok(self.ACTION_GENERAL_CONVERSATION, 0.9, "News keyword")
+            return self._ok(self.ACTION_SKILL_DISPATCH, 0.95, "NewsSkill")
 
         # Focus / DND
         if re.search(r"\b(focus\s+mode|do\s+not\s+disturb|dnd)\b", c):
-            return self._ok(self.ACTION_GENERAL_CONVERSATION, 0.9, "Focus keyword")
+            return self._ok(self.ACTION_SKILL_DISPATCH, 0.95, "FocusSkill")
 
         # Obvious web search
         if re.search(r"\b(who\s+is|what\s+is|where\s+is|when\s+(did|was)|how\s+old|tell\s+me\s+about)\b", c):

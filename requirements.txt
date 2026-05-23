@@ -35,3 +35,10 @@ face-recognition
 # Voice Engine (Ultra-Fast Apple Speech Recognition)
 pyobjc-framework-Speech>=10.0
 pyobjc-framework-AVFoundation>=10.0
+
+# Voice ID (Speaker Verification — ECAPA-TDNN)
+speechbrain>=1.0.0
+torchaudio>=2.0.0
+
+# Cobra VAD (Picovoice Voice Activity Detection)
+pvcobra>=2.0.0

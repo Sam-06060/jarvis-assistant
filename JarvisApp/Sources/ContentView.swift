@@ -14,6 +14,8 @@ struct ContentView: View {
     
     // UI states for Audio toggle
     @AppStorage("FORCE_MAC_BUILTIN_AUDIO") private var forceBuiltInAudio = true
+    // UI state for Voice ID toggle
+    @AppStorage("ENABLE_VOICE_ID") private var voiceIDEnabled = true
     @State private var showSettingsSidebar = false
 
     private var chatMessages: [JarvisMessage] {
@@ -68,7 +70,7 @@ struct ContentView: View {
             }
             .overlay(alignment: .trailing) {
                  if showSettingsSidebar {
-                     SettingsSidebar(forceBuiltInAudio: $forceBuiltInAudio, showSettingsSidebar: $showSettingsSidebar)
+                     SettingsSidebar(forceBuiltInAudio: $forceBuiltInAudio, voiceIDEnabled: $voiceIDEnabled, showSettingsSidebar: $showSettingsSidebar)
                          .environmentObject(socketClient)
                          .transition(.move(edge: .trailing))
                          .zIndex(100)
@@ -2156,6 +2158,7 @@ private extension Color {
 // MARK: - Settings Sidebar
 struct SettingsSidebar: View {
     @Binding var forceBuiltInAudio: Bool
+    @Binding var voiceIDEnabled: Bool
     @Binding var showSettingsSidebar: Bool
     @EnvironmentObject var socketClient: SocketClient
 
@@ -2204,6 +2207,24 @@ struct SettingsSidebar: View {
                             }
                         
                         Text("When enabled, Jarvis bypasses your Bluetooth default and forces the physical Mac microphone and speakers. Prevents call interruptions!")
+                            .font(.system(size: 13))
+                            .foregroundColor(.white.opacity(0.5))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.horizontal, 24)
+
+                    Divider().background(Color.white.opacity(0.1))
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        Toggle("Voice ID (Speaker Verification)", isOn: $voiceIDEnabled)
+                            .toggleStyle(SwitchToggleStyle(tint: .green))
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundColor(.white)
+                            .onChange(of: voiceIDEnabled) { newValue in
+                                socketClient.setVoiceIDEnabled(newValue)
+                            }
+                        
+                        Text("Only responds to YOUR voice. Other people, TVs, and YouTube saying \"Jarvis\" will be silently rejected.")
                             .font(.system(size: 13))
                             .foregroundColor(.white.opacity(0.5))
                             .fixedSize(horizontal: false, vertical: true)

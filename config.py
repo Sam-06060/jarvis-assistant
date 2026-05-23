@@ -154,6 +154,14 @@ PHONE_MAC_ADDRESS = os.getenv("PHONE_MAC_ADDRESS")
 ENABLE_FACE_ID = True # <--- Master Toggle for Face ID Animation & Check
 REFERENCE_IMAGE_PATH = os.getenv("REFERENCE_IMAGE_PATH", os.path.join(DATA_DIR, "me.jpg"))
 
+# ============== VOICE ID (Speaker Verification) ==============
+ENABLE_VOICE_ID = True
+VOICE_ID_THRESHOLD = 0.25       # Cosine similarity threshold (0.0–1.0, lower = stricter)
+VOICE_ID_MODEL_DIR = os.path.join(DATA_DIR, "models", "spkrec-ecapa-voxceleb")
+VOICE_ID_EMBEDDINGS_DIR = os.path.join(DATA_DIR, "voice_id")
+
+
+
 # ============== OLLAMA CONFIG (Simple/Local) ==============
 OLLAMA_URL = "http://localhost:11434" # Default Port
 OLLAMA_MODEL = "llama3.2" # 3B Model (Cool & Fast)
@@ -207,11 +215,10 @@ AGENTIC_LLM_PROVIDER = os.getenv("AGENTIC_LLM_PROVIDER", "groq")
 AGENTIC_LLM_MODEL = os.getenv("AGENTIC_LLM_MODEL", "llama-3.3-70b-versatile")
 
 # ============== AGENTIC MODE (Modular/Toggleable) ==============
-ENABLE_AGENTIC_MODE = True
+ENABLE_AGENTIC_MODE = False
 ENABLE_PLANNER_SPLIT = False  # DISABLED: StatelessPlanner created plan-within-plan loops. AgentCore.TaskPlanner handles all agentic tasks directly.
 AGENTIC_MAX_ITERATIONS = 20  # Max steps in a single ReAct loop (hard capped by execution guards)
-AGENTIC_TIMEOUT_SECONDS = 300 # Per-step guards handle real limits; this is the outer bound
-TOOL_CALL_MAX_RETRIES = 3    # Bounds: 0-5 — each retry MUST use a different approach
+AGENTIC_TIMEOUT_SECONDS = 300 # Per-step guards handle real limits; this is the outer boundTOOL_CALL_MAX_RETRIES = 3    # Bounds: 0-5 — each retry MUST use a different approach
 
 # ============== HEARTBEAT & PLAN MODE ==============
 HEARTBEAT_MAX_SILENCE_SECONDS = 3  # Max seconds before a generic heartbeat pulse is emitted
@@ -258,3 +265,4 @@ if _missing:
         RuntimeWarning,
         stacklevel=2,
     )
+

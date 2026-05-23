@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import threading
 import time
@@ -6,6 +7,8 @@ from datetime import datetime, timedelta
 from dateutil import parser
 import subprocess
 import re
+
+logger = logging.getLogger(__name__)
 
 class ReminderManager:
     """Background reminder system"""
@@ -24,17 +27,19 @@ class ReminderManager:
                 with open(self.data_file, 'r') as f:
                     self.reminders = json.load(f)
         except Exception as e:
-            print(f"Warning: Could not load reminders: {e}")
+            logger.warning(f"Could not load reminders: {e}")
             self.reminders = []
     
     def save_reminders(self):
-        """Save reminders to disk"""
+        """Atomically save reminders to disk (write to .tmp then rename)."""
         try:
-            os.makedirs(os.path.dirname(self.data_file), exist_ok=True)
-            with open(self.data_file, 'w') as f:
+            os.makedirs(os.path.dirname(self.data_file) or '.', exist_ok=True)
+            tmp_path = self.data_file + ".tmp"
+            with open(tmp_path, 'w') as f:
                 json.dump(self.reminders, f, indent=2)
+            os.replace(tmp_path, self.data_file)  # atomic on POSIX
         except Exception as e:
-            print(f"Warning: Could not save reminders: {e}")
+            logger.warning(f"Could not save reminders: {e}")
     
     def add_reminder(self, message, when_string):
         """Add a new reminder with Smart AM/PM inference"""
@@ -172,22 +177,22 @@ class ReminderManager:
                 time.sleep(0.5)
                 
             except Exception as e:
-                print(f"Reminder check error: {e}")
+                logger.error(f"Reminder check error: {e}")
                 time.sleep(5)
 
     def _trigger_reminder(self, reminder):
         """Trigger a reminder notification (NON-BLOCKING)"""
         try:
             message = reminder["message"]
-            print(f"\n🔔 REMINDER: {message}", flush=True)
-            
+            logger.info(f"\U0001f514 REMINDER TRIGGERED: {message}")
+
             script = f'display notification "{message}" with title "JARVIS" sound name "Glass"'
             subprocess.Popen(["osascript", "-e", script])
             subprocess.Popen(["afplay", "/System/Library/Sounds/Glass.aiff"])
             subprocess.Popen(["say", f"Reminder: {message}"])
-            
+
         except Exception as e:
-            print(f"Error triggering reminder: {e}")
+            logger.error(f"Error triggering reminder: {e}")
             
     def clear_old_reminders(self):
         cutoff = datetime.now() - timedelta(days=1)

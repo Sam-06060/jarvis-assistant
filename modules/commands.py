@@ -25,6 +25,37 @@ from .visuals import VisualsManager
 # -----------------------------------------------------
 from .registrar import SkillRegistrar
 
+class _LiveContext(dict):
+    """
+    App-context dict that falls back to the live ServiceRegistry for any key
+    that was None at CommandProcessor init time.
+
+    This fixes the timing race where optional services (weather, music, news,
+    alarms, etc.) are registered AFTER CommandProcessor.__init__() finishes,
+    leaving their slots permanently None in a plain dict snapshot.
+    """
+    def __init__(self, registry, static_data: dict):
+        super().__init__(static_data)
+        self._registry = registry
+
+    def get(self, key, default=None):
+        val = super().get(key)
+        if val is not None:
+            return val
+        # Live fallback — catches services registered after our init
+        # Map context keys that differ from registry keys
+        _KEY_MAP = {
+            'email_manager': 'email',
+            'alarm_manager': 'alarms',
+        }
+        registry_key = _KEY_MAP.get(key, key)
+        live_val = self._registry.get(registry_key)
+        if live_val is not None:
+            # Cache so future lookups are instant
+            self[key] = live_val
+        return live_val if live_val is not None else default
+
+
 class CommandProcessor:
     def __init__(self, registry_class):
         
@@ -57,39 +88,31 @@ class CommandProcessor:
         self.memory_vault = {} 
         self._tools_ready = threading.Event()
         self.tools = {}
+
+        # Safe sentinel defaults — set before background threads so process()
+        # never raises AttributeError if a command arrives before init completes.
+        self.architect_skill = None
+        self.command_phrases = []
+        self.intent_router = None  # Replaced by real IntentRouter below
         
-        # Build App Context (Proxy for registry)
-        self.app_context = {
+        # Build App Context — uses _LiveContext so late-registered services
+        # (weather, music, alarms, etc.) are discovered on first use, not at boot.
+        _static = {
             'registry': self.registry,
             'speech': self.registry.get('speech'),
             'brain': self.registry.get('brain'),
             'files': self.registry.get('files'),
             'system': self.registry.get('system'),
             'config': config,
-            'analytics': self.registry.get('analytics'),
-            'weather': self.registry.get('weather'),
-            'fuzzy': self.registry.get('fuzzy'),
-            'music': self.registry.get('music'),
-            'news': self.registry.get('news'),
-            'calculator': self.registry.get('calculator'),
-            'email_manager': self.registry.get('email'),  
-            'contacts': self.registry.get('contacts'),
-            'shortcuts': self.registry.get('shortcuts'),
             'ghost': self.registry.get('ghost') or self.ghost,
-            'cursor': None, 
+            'cursor': None,
             'visuals': self.registry.get('visuals') or self.visuals,
             'assassin': self.registry.get('assassin') or self.assassin,
             'dead_drop': self.registry.get('dead_drop') or self.dead_drop,
             'command_processor': self,
-            'clipboard': self.registry.get('clipboard'),
-            'focus': self.registry.get('focus'),
-            'calendar': self.registry.get('calendar'),
-            'reminders': self.registry.get('reminders'),
-            'mimic': self.registry.get('mimic') or self.mimic, 
-            'translator': self.registry.get('translator'),
-            'alarm_manager': self.registry.get('alarms'),
-            'socket_server': self.registry.get('socket_server'),
+            'mimic': self.registry.get('mimic') or self.mimic,
         }
+        self.app_context = _LiveContext(self.registry, _static)
 
         # Background: Intent Router (Start ASAP)
         def init_intent_bg():
@@ -97,36 +120,21 @@ class CommandProcessor:
             self.intent_router = IntentRouter()
         threading.Thread(target=init_intent_bg, daemon=True, name="IntentInit").start()
 
-        # Parallel Skill Loading
+        # Parallel Skill Loading — fault-isolated, custom-skill-aware
         def _load_all_skills():
-            t_skills = time.time()
-            from modules.skills import (
-                SystemSkill, TimeSkill, AppControlSkill, WeatherSkill,
-                MusicSkill, NewsSkill, CalculatorSkill, CommunicationSkill,
-                InternetSkill, FileSkill, FocusSkill, ResearchSkill,
-                AutomationSkill, ShortcutsSkill, InteractionSkill, ArchitectSkill,
-                ReminderSkill, AnalyticsSkill, TranslatorSkill, AlarmSkill
-            )
-            from modules.skills.smartthings_skill import SmartThingsSkill
-            
-            classes = [
-                SmartThingsSkill, InteractionSkill, SystemSkill, FocusSkill, InternetSkill,
-                TimeSkill, ReminderSkill, AnalyticsSkill, TranslatorSkill, AlarmSkill,
-                WeatherSkill, NewsSkill, CalculatorSkill, AppControlSkill, FileSkill,
-                CommunicationSkill, ShortcutsSkill, ArchitectSkill, MusicSkill, ResearchSkill,
-                AutomationSkill
-            ]
-            
-            with ThreadPoolExecutor(max_workers=len(classes)) as pool:
-                instances = list(pool.map(lambda cls: cls(self.app_context), classes))
-            
+            from core.skill_loader import load_all_skills
+            _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            instances = load_all_skills(self.app_context, _project_root)
             self.skills.extend(instances)
             # Reference specifically needed for intent router
-            self.architect_skill = next((s for s in self.skills if isinstance(s, ArchitectSkill)), None)
-            logger.info(f"⚡ Skills Bootstrapped (Parallel): {time.time()-t_skills:.2f}s")
-            
-            # Background: Index Phrases for Speech Engine
-            threading.Thread(target=self._deferred_speech_context, daemon=True, name="SpeechContext").start()
+            from modules.skills import ArchitectSkill
+            self.architect_skill = next(
+                (s for s in self.skills if isinstance(s, ArchitectSkill)), None
+            )
+            # Build speech phrase index
+            threading.Thread(
+                target=self._deferred_speech_context, daemon=True, name="SpeechContext"
+            ).start()
 
         threading.Thread(target=_load_all_skills, daemon=True, name="SkillsInit").start()
 
@@ -201,13 +209,30 @@ class CommandProcessor:
             return f"Error running '{tool_name}': {str(e)}"
 
 
-    def process(self, command_text, web_search=False):
+    def process(self, command_text, web_search=False, from_routine=False):
         """
         Main Entry Point for Command Processing.
         Delegates all logic to the Skill System.
+
+        Args:
+            from_routine: If True, this command is a sub-step of a shortcut/routine.
+                          Suppresses "switch to agentic mode" hints.
         """
+        # ── LOCK SCREEN GUARD ─────────────────────────────────────────────────
+        # If the Mac screen is locked, Jarvis is completely deaf.
+        # No command processing, no spoken response (audible to anyone nearby).
+        try:
+            from modules.lock_screen_monitor import is_screen_locked
+            if is_screen_locked():
+                logger.debug("🔒 Command blocked — screen is locked.")
+                return False
+        except Exception:
+            pass  # If the monitor fails to import, don't block normal operation
+        # ─────────────────────────────────────────────────────────────────────
+
         # Store web_search flag for AI brain fallback
         self.current_web_search = web_search
+        self._from_routine = from_routine
         logger.debug(f"🔍 CommandProcessor.process() received web_search={web_search}")  # DEBUG
         
         try:
@@ -302,17 +327,39 @@ class CommandProcessor:
         except Exception as e:
             logger.error(f"⚠️ Intent Router Error: {e}")
 
-        # 0.4 Agentic Force Route — intent-driven (replaces old _is_complex_query heuristic)
+        # 0.4 Agentic Force Route — intent-driven
         if config.ENABLE_AGENTIC_MODE:
             intent = intent_data.get("intent", "")
-            
+
+            # ── SMARTTHINGS PRIORITY BYPASS ───────────────────────────────────────
+            # Hardware commands (AC on/off/temp) MUST execute via SmartThingsSkill.
+            # They are NOT shell commands and must NEVER enter the agentic loop.
+            # Check this BEFORE the SYSTEM_CONTROL → AgentCore gate.
+            _st_skill = next(
+                (s for s in self.skills if s.__class__.__name__ == "SmartThingsSkill"), None
+            )
+            if _st_skill and _st_skill.can_handle(cmd):
+                try:
+                    result = _st_skill.handle(cmd)
+                    if result not in (None, False):
+                        self._log_analytics(cmd, "SmartThingsSkill", True, time.time() - start_time)
+                        return True
+                except Exception as e:
+                    logger.error(f"⚠️ SmartThings priority bypass error: {e}")
+                    # Don’t fall through to AgentCore on hardware errors — return handled
+                    return True
+            # ────────────────────────────────────────────────────────────
+
             # Explicit shell execution phrasing always goes to AgentCore
+            # NOTE: SYSTEM_CONTROL is intentionally excluded — hardware commands
+            # (AC, SmartThings) are caught above; SYSTEM_CONTROL reaching here
+            # means it’s a true OS-level command (lock screen, volume, etc.) that
+            # the skill system handles better than AgentCore.
             _is_shell_cmd = bool(
                 re.search(r"^(?:run|execute)\s+the\s+(?:command|script|code|shell|terminal|bash|zsh)\b", cmd.lower())
                 or re.search(r"\bpython3?\b|\bnpm\b|\bnode\b|\bbash\b|\bzsh\b|\bsh\b|\bls\b|\bpip\b|\bgit\b", cmd.lower())
-                or (intent == "SYSTEM_CONTROL")
             )
-            
+
             # Route to AgentCore if: shell command, AGENTIC_TASK intent, or architect intent
             if _is_shell_cmd or intent == "AGENTIC_TASK" or intent in ("ARCHITECT_NEW", "ARCHITECT_UPDATE_MINOR", "ARCHITECT_UPDATE_MAJOR"):
                 logger.info(f"🤖 Routing to AgentCore — intent={intent}: '{cmd}'")
@@ -351,6 +398,18 @@ class CommandProcessor:
         except Exception as e:
             logger.error(f"⚠️ NLP Architect Route Error: {e}")
 
+        # 0.45 Standard Mode graceful degradation — hint Agentic Mode for complex tasks
+        # Skip this hint when executing sub-commands inside a routine/shortcut
+        if not config.ENABLE_AGENTIC_MODE and not getattr(self, '_from_routine', False) and self._is_complex_query(cmd):
+            speech = self.registry.get('speech')
+            if speech:
+                speech.speak(
+                    "This task involves multiple steps and is better suited for Agentic Mode. "
+                    "Please switch to Agentic Mode for full execution, sir."
+                )
+                logger.info(f"💡 Standard Mode: graceful agentic-hint for complex query: '{cmd}'")
+            return True  # Handled (with explanation)
+
         # 0.5 Regex Route (deterministic intent extraction)
         regex_route = self._regex_pre_route(cmd, intent_data)
         if regex_route:
@@ -388,8 +447,16 @@ class CommandProcessor:
             if cmd in affirmations:
                 logger.debug(f"🛡️ Protected affirmation token from fuzzy matching: '{cmd}'")
             else:
-                # Tighten cutoff for short commands to prevent weak mis-matches
-                cutoff = 0.75 if len(cmd) < 5 else 0.6
+                # Tighten cutoff based on command length to prevent weak mis-matches:
+                # - Very short (< 5 chars): 0.75 — very strict, almost exact match required
+                # - Medium (5-20 chars):    0.80 — strict enough to block 'hello jarvis' → 'hello jarvis custom'
+                # - Long (> 20 chars):      0.65 — longer commands have more signal, looser OK
+                if len(cmd) < 5:
+                    cutoff = 0.75
+                elif len(cmd) <= 20:
+                    cutoff = 0.80
+                else:
+                    cutoff = 0.65
                 matches = difflib.get_close_matches(cmd, self.command_phrases, n=1, cutoff=cutoff)
                 if matches:
                     matched_phrase = matches[0]

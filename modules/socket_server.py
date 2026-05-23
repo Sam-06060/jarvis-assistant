@@ -2,6 +2,11 @@ import socket
 import threading
 import json
 import time
+import logging
+import subprocess
+import os
+
+logger = logging.getLogger(__name__)
 
 class JarvisSocketServer:
     def __init__(self, port=8492, input_queue=None, hud_queue=None):
@@ -16,28 +21,90 @@ class JarvisSocketServer:
         self.last_partial_time = 0 # For filtering native speech
 
     def start(self):
-        """Start the socket server in a background thread"""
+        """Start the socket server in a background thread — instant bind, no sleeps."""
+        _t0 = time.time()
         self.running = True
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+        # ── Socket options for instant rebind on macOS ──────────────────────────
+        # SO_REUSEADDR: reuse address in TIME_WAIT state
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # SO_REUSEPORT: macOS-specific — lets the OS release the port immediately
+        if hasattr(socket, 'SO_REUSEPORT'):
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        # SO_KEEPALIVE: detect dead Swift clients in <10s instead of 2hrs
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+
+        # ── Kill any zombie process holding our port before bind ────────────────
+        killed_any = self._kill_stale_process_on_port(self.port)
+
+        # ── Bind — with one retry after killing stale processes ─────────────────
         try:
             self.server_socket.bind(('0.0.0.0', self.port))
-            print(f"✅ Socket bound to 0.0.0.0:{self.port}")
         except OSError:
-            print(f"⚠️ Port {self.port} in use. Waiting 2 seconds...")
-            time.sleep(2)
-            try:
-                self.server_socket.bind(('0.0.0.0', self.port))
-            except Exception as e:
-                print(f"❌ Failed to bind port {self.port}: {e}")
+            if killed_any:
+                # We killed a stale process — wait for OS to release the port (max 500ms)
+                deadline = time.time() + 0.5
+                bound = False
+                while time.time() < deadline:
+                    time.sleep(0.05)
+                    try:
+                        self.server_socket.bind(('0.0.0.0', self.port))
+                        bound = True
+                        break
+                    except OSError:
+                        continue
+                if not bound:
+                    logger.critical(f"❌ Cannot bind port {self.port} even after killing stale processes.")
+                    self.running = False
+                    return
+            else:
+                logger.critical(f"❌ Cannot bind port {self.port} — is another Jarvis instance running?")
+                self.running = False
                 return
-        self.server_socket.listen(5)
-        
-        print(f"🔌 API Server listening on port {self.port}")
-        
+
+        self.server_socket.listen(10)  # Increased backlog (was 5)
+        elapsed_ms = int((time.time() - _t0) * 1000)
+        logger.info(f"✅ Socket server ready on :{self.port} in {elapsed_ms}ms")
+
         # Thread for accepting connections
-        self.accept_thread = threading.Thread(target=self._accept_clients, daemon=True)
+        self.accept_thread = threading.Thread(target=self._accept_clients, daemon=True, name="SocketAccept")
         self.accept_thread.start()
+
+    def _kill_stale_process_on_port(self, port: int) -> bool:
+        """
+        Kill any zombie process holding our port before the bind attempt.
+        Uses lsof (always available on macOS) — non-blocking, non-fatal.
+        Returns True if any process was killed (caller should retry bind with a short wait).
+        """
+        killed = False
+        try:
+            result = subprocess.run(
+                ["lsof", "-ti", f"tcp:{port}"],
+                capture_output=True, text=True, timeout=2
+            )
+            pids = result.stdout.strip().split()
+            my_pid = str(os.getpid())
+            for pid in pids:
+                pid = pid.strip()
+                if pid and pid != my_pid:
+                    subprocess.run(["kill", "-9", pid], timeout=1, capture_output=True)
+                    logger.info(f"🔫 Killed stale process PID={pid} holding port {port}")
+                    killed = True
+        except FileNotFoundError:
+            pass  # lsof not available — bind will reveal the problem
+        except Exception:
+            pass  # Non-fatal — bind attempt will catch any remaining issue
+        return killed
+
+    def _send_to_client(self, client_sock: socket.socket, header: str, detail: str) -> bool:
+        """Send a single HUD message directly to one client. Returns False on failure."""
+        try:
+            msg = json.dumps({"type": "hud_update", "header": header, "detail": detail}) + "\n"
+            client_sock.sendall(msg.encode('utf-8'))
+            return True
+        except Exception:
+            return False
 
     def _accept_clients(self):
         while self.running:
@@ -45,22 +112,26 @@ class JarvisSocketServer:
                 client_sock, addr = self.server_socket.accept()
                 with self.lock:
                     self.clients.append(client_sock)
-                # handle client in a separate thread
-                threading.Thread(target=self._handle_client, args=(client_sock,), daemon=True).start()
 
-                # 🚀 PROACTIVE SYNC: Broadcast current agent state to NEW client
+                # ── INSTANT state sync to new client (no sleep) ─────────────────
+                # Send agent state immediately so Swift UI is populated before
+                # the first frame renders. Previously had a 0.5s blocking sleep here.
                 try:
                     import config
                     status = "ON" if getattr(config, "ENABLE_AGENTIC_MODE", False) else "OFF"
-                    # We use a short delay to ensure the client is ready to receive
-                    def sync_broadcast():
-                        time.sleep(0.5)
-                        self.broadcast("SYSTEM", f"Agentic Mode: {status}")
-                    threading.Thread(target=sync_broadcast, daemon=True).start()
-                except: pass
+                    self._send_to_client(client_sock, "SYSTEM", f"Agentic Mode: {status}")
+                except Exception:
+                    pass
+
+                # Start client handler thread AFTER initial sync
+                threading.Thread(
+                    target=self._handle_client, args=(client_sock,),
+                    daemon=True, name=f"SocketClient-{addr[0]}"
+                ).start()
+
             except Exception as e:
                 if self.running:
-                    print(f"Socket Accept Error: {e}")
+                    logger.error(f"Socket Accept Error: {e}")
 
     def _handle_client(self, client_sock):
         """Reads data from a client and puts it into input_queue"""
@@ -102,6 +173,19 @@ class JarvisSocketServer:
                                 logger.debug(f"🔇 Ignoring Native Speech Final: '{data[:50]}...'")
                                 self.last_partial_time = 0 
                                 continue
+
+                            # 3. LOCK SCREEN GUARD
+                            # If the Mac screen is locked, drop ALL user commands silently.
+                            # Internal config updates (__UPDATE_CONFIG__) are still allowed
+                            # so the app can stay in sync, but no user commands go through.
+                            if not data.startswith("__UPDATE_CONFIG__"):
+                                try:
+                                    from modules.lock_screen_monitor import is_screen_locked
+                                    if is_screen_locked():
+                                        logger.debug(f"🔒 [Socket] Command blocked — screen locked: '{data[:40]}'")
+                                        continue
+                                except Exception:
+                                    pass  # Never block on monitor failure
 
                             logger.info(f"📥 Received CMD: {data[:100]}... [Web: {web_search}]")
                             

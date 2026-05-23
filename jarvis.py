@@ -101,7 +101,13 @@ class JarvisApp:
         import time
         t_start = time.time()
         logger.info("🔧 Initializing Subsystems (Nuclear Parallel)...")
-        
+
+        # ─── Agent-ready event: lets announce_online() wait for AgentCore ────
+        # Set immediately if agentic mode is off, so no blocking occurs.
+        self._agent_ready = threading.Event()
+        if not getattr(config, "ENABLE_AGENTIC_MODE", False):
+            self._agent_ready.set()  # Nothing to wait for
+
         # 🔐 Check all macOS permissions in background thread
         def check_perms_bg():
             try:
@@ -112,11 +118,11 @@ class JarvisApp:
         threading.Thread(target=check_perms_bg, daemon=True, name="PermCheck-Bg").start()
 
         self._update_hud("BOOTING", "Warp Speed Init")
-        
+
         try:
             # Result containers for thread safety in assignments
             _speech = [None]; _history = [None]; _files = [None]; _sys_info = [None]
-            
+
             def init_speech():
                 from modules.speech import SpeechEngine
                 s = SpeechEngine(hud_queue=self.hud_queue)
@@ -142,8 +148,34 @@ class JarvisApp:
                     except Exception as e:
                         logger.warning(f"⚠️ FaceID Init failed: {e}")
 
+            # ─── WAVE 2a: AgentCore parallel init (boots alongside brain/commander) ─
+            # Runs concurrently from T+0 so it's ready exactly when brain is ready.
+            # Uses the local model cache so no network calls on subsequent boots.
+            def init_agent_wave2():
+                if not getattr(config, "ENABLE_AGENTIC_MODE", False):
+                    return  # Nothing to do; _agent_ready already set above
+                try:
+                    # Wait for brain (AgentCore needs it for TaskPlanner)
+                    while not ServiceRegistry.get("brain"): time.sleep(0.05)
+                    logger.info("🤖 Initializing AgentCore (Wave 2)...")
+                    t0 = time.time()
+                    from modules.agent_core import AgentCore
+                    agent_cfg = config.AgentConfig(
+                        enabled=True,
+                        max_iterations=getattr(config, "AGENTIC_MAX_ITERATIONS", 30),
+                        timeout=getattr(config, "AGENTIC_TIMEOUT_SECONDS", 30),
+                        retry_budget=getattr(config, "TOOL_CALL_MAX_RETRIES", 2)
+                    )
+                    agent_cfg.validate()
+                    self.agent = AgentCore(registry=ServiceRegistry, config=agent_cfg)
+                    logger.info(f"✅ AgentCore ready in {time.time()-t0:.2f}s")
+                except Exception as e:
+                    logger.error(f"❌ AgentCore Wave2 init failed: {e}")
+                finally:
+                    self._agent_ready.set()  # Always unblock announce_online
+
             # --- WAVE 1: CORE PARALLEL (Critical for Interaction) ---
-            with ThreadPoolExecutor(max_workers=10, thread_name_prefix="JarvisWarp") as pool:
+            with ThreadPoolExecutor(max_workers=12, thread_name_prefix="JarvisWarp") as pool:
                 # Essential for T-0 Interaction
                 core_futs = [
                     pool.submit(init_speech),
@@ -151,63 +183,52 @@ class JarvisApp:
                     pool.submit(init_files),
                     pool.submit(init_sysinfo),
                 ]
-                
-                # WAVE 2: Dependent Heavies (Start immediately, but don't block 'Core Ready' signal)
+
+                # WAVE 2: Dependent Heavies — start immediately, don't block Core Ready
                 def init_brain_late():
                     while not _history[0]: time.sleep(0.01)
                     from modules.brain import AIBrain; from utils.offline_cache import OfflineCache
                     brain = AIBrain(context_manager=_history[0], offline_cache=OfflineCache())
                     ServiceRegistry.register("brain", brain)
-                
+
                 def init_commander_late():
                     while not ServiceRegistry.get("speech"): time.sleep(0.01)
                     from modules.commands import CommandProcessor
                     commander = CommandProcessor(ServiceRegistry)
                     ServiceRegistry.register("commander", commander)
 
-                # Background these heavily
                 pool.submit(init_brain_late)
                 pool.submit(init_commander_late)
-                
-                # FaceID: decoupled background startup (Not blocking Core Ready)
+                # AgentCore runs in its own thread (waits for brain internally)
+                threading.Thread(target=init_agent_wave2, daemon=True, name="AgentCoreWave2").start()
+
+                # FaceID: decoupled background startup
                 threading.Thread(target=init_faceid_bg, daemon=True, name="FaceID-Warp").start()
-                
-                # Wait ONLY for Core logic to be ready (Interaction Ready)
+
+                # Wait ONLY for Core to be ready (Interaction Ready)
                 from concurrent.futures import wait
                 wait(core_futs)
-                
-            # Secondary Background Chain (Brain, Commander, Agentic, etc.)
-            def init_secondary_bg():
-                # Start WAVE 2 inside pool if not already
-                # Actually WAVE 2 was already submitted to pool above.
-                pass
-            
+
             logger.info(f"⏱️ TOTAL INIT (Core): {time.time()-t_start:.2f}s")
 
-            # Move Phase C & Agentic to a separate background cycle to keep Boot Time < 10s
+            # --- PHASE C: Optional modules + Memory (pure background) ---
             def finish_init_bg():
                 try:
-                    # --- PHASE C: Secondary Background ---
                     self._init_optional_modules()
-                    
                     def init_memory_bg():
                         from modules.memory_manager import MemoryManager
-                        # Wait for history
                         while not _history[0]: time.sleep(0.01)
                         memory_mgr = MemoryManager(history_component=_history[0], knowledge_file="data/knowledge.json")
                         ServiceRegistry.register("memory", memory_mgr)
                     threading.Thread(target=init_memory_bg, daemon=True, name="MemoryInit").start()
-
-                    # Initialize Agentic Mode in background
-                    if getattr(config, "ENABLE_AGENTIC_MODE", False):
-                        self._toggle_agent(True, silent=True)
                 except Exception as e:
                     logger.error(f"⚠️ Secondary initialization failed: {e}")
-
             threading.Thread(target=finish_init_bg, daemon=True, name="SecondaryInit").start()
+
         except Exception as e:
             logger.critical(f"❌ FATAL INITIALIZATION ERROR: {e}", exc_info=True)
             self._update_hud("ERROR", "Startup Failed")
+            self._agent_ready.set()  # Unblock on error too
             raise e
 
     def _init_optional_modules(self):
@@ -278,6 +299,47 @@ class JarvisApp:
         ServiceRegistry.register("socket_server", self.api_server)
         self._wrap_hud_queue_for_sockets()
         logger.info(f"⏱️ Socket server ready: {time.time()-t_boot:.2f}s")
+
+        # ── BOOT CACHE CHECK — runs after socket (UI responsive) but before heavy init ──
+        from core.boot_cache import BootCacheManager, apply_warm_boot_state, capture_full_boot_state
+        _boot_cache = BootCacheManager(project_root=getattr(config, 'ROOT_DIR', os.path.dirname(os.path.abspath(__file__))))
+        _is_warm_boot = _boot_cache.is_warm_boot()
+        _warm_state: dict = {}
+        _stale_components: list = []
+
+        if _is_warm_boot:
+            _loaded = _boot_cache.load()
+            if _loaded:
+                # Check which components changed (if any)
+                _stale_components = _boot_cache.get_stale_components()
+
+                if "core" in _stale_components:
+                    # Core/config changed — must cold boot fully
+                    _is_warm_boot = False
+                    _boot_cache.invalidate()
+                    logger.info("❄️  Core changed — full cold boot required")
+                else:
+                    # Skills or semantic changed — partial warm boot:
+                    # GroqClient + SemanticRouter state still valid from cache
+                    _warm_state = _loaded
+                    apply_warm_boot_state(_warm_state)
+                    if _stale_components:
+                        logger.info(
+                            f"♻️  Partial warm boot — stale: {_stale_components} — "
+                            f"cache still covers: groq_client, semantic_router"
+                        )
+                    else:
+                        logger.info("♥️  Full warm boot: all cached state applied")
+            else:
+                _is_warm_boot = False
+                logger.info("❄️  Warm boot cancelled (cache load failed) — cold boot")
+        else:
+            logger.info("❄️  Cold boot — full initialization will run")
+
+        self._boot_cache = _boot_cache
+        self._is_warm_boot = _is_warm_boot
+        self._warm_state = _warm_state
+        self._stale_components = _stale_components  # Used by skill_loader to decide reload
         
         # --- NUCLEAR STARTUP: SIGNAL READINESS IMMEDIATELY ---
         # We signal online as soon as the socket is ready to accept UI connections.
@@ -285,12 +347,20 @@ class JarvisApp:
         self._update_hud("IDLE", "Online")
         logger.info(f"⏱️ ═══ TOTAL BOOT TIME: {time.time()-t_boot:.2f}s ═══")
 
-        # 2. Early Semantic Boot (Start Indexing in Background)
+        # 2. Early Semantic Boot (warm path: instant; cold path: background thread)
         def _early_semantic_boot():
             try:
                 from modules.semantic_router import SemanticRouter
                 _registry_path = os.path.join(config.ROOT_DIR, "modules", "agent_skills", "_registry.json")
-                SemanticRouter.instance().boot(_registry_path)
+                sr = SemanticRouter.instance()
+                if self._is_warm_boot:
+                    # Warm boot: load .npz cache directly — no model, no thread, ~50ms
+                    if not sr.warm_boot():
+                        # npz cache somehow missing — fall back to background build
+                        sr.boot(_registry_path)
+                else:
+                    # Cold boot: spin background thread as before
+                    sr.boot(_registry_path)
             except Exception as e:
                 logger.warning(f"⚠️ Early SemanticRouter boot failed: {e}")
         
@@ -313,23 +383,63 @@ class JarvisApp:
             # --- HYPER INITIALIZATION ---
             self.initialize_systems()
 
-            # Background Services
-            reminders = ServiceRegistry.get("reminders")
-            if reminders: reminders.start_background_check()
+            # ── COLD BOOT: Save state for next warm boot ──────────────────────────────
+            # Runs in background (non-blocking) after all core services are up.
+            if not self._is_warm_boot:
+                def _save_boot_cache_bg():
+                    # Wait briefly for background services to settle
+                    time.sleep(3)
+                    try:
+                        boot_state = capture_full_boot_state()
+                        self._boot_cache.save(boot_state)
+                    except Exception as e:
+                        logger.warning(f"\u26a0\ufe0f Boot cache save failed: {e}")
+                threading.Thread(target=_save_boot_cache_bg, daemon=True, name="BootCacheSave").start()
+
+            # Background Services — Start reminder checker AFTER proxy resolves
+            def _start_reminders_when_ready():
+                """Wait for ServiceProxy to hot-swap to real ReminderManager, then start checker."""
+                for _ in range(120):  # Wait up to 60 seconds (120 × 0.5s)
+                    svc = ServiceRegistry.get("reminders")
+                    if svc is None:
+                        break  # Reminders disabled
+                    # ServiceProxy.__getattr__ intercepts ALL attribute access and returns a
+                    # callable stub — so hasattr() always returns True even on the proxy.
+                    # Instead, check the concrete class name to confirm the hot-swap happened.
+                    if type(svc).__name__ == "ReminderManager":
+                        svc.start_background_check()
+                        logger.info("✅ Reminder background checker started")
+                        return
+                    time.sleep(0.5)
+                logger.warning("⚠️ Reminder system never became ready — background checker NOT started")
+            threading.Thread(target=_start_reminders_when_ready, daemon=True, name="ReminderStarter").start()
             self._setup_hotkeys()
 
-            # Finalize Online Status (Speech feedback when ready)
+            # Finalize Online Status — wait for speech AND AgentCore (if agentic mode on)
             def announce_online():
                 while not ServiceRegistry.get("speech"): time.sleep(0.1)
+                # Block announcement until AgentCore is fully ready (timeout 120s safety)
+                agent_ready = getattr(self, '_agent_ready', None)
+                if agent_ready:
+                    agent_ready.wait(timeout=120)
                 speech = ServiceRegistry.get("speech")
+                status = "ON" if self.agent is not None else "OFF"
+                self._update_hud("SYSTEM", f"Agentic Mode: {status}")
+                self._update_hud("IDLE", "Online")
                 speech.play_wake_sound()
                 speech.speak("All systems online.")
+
+                # ── Lock Screen Guard ─────────────────────────────────────────
+                # Start AFTER speech is ready so it can pause/resume the mic.
+                try:
+                    from modules.lock_screen_monitor import LockScreenMonitor
+                    _lock_monitor = LockScreenMonitor(registry=ServiceRegistry)
+                    _lock_monitor.start()
+                except Exception as e:
+                    logger.warning(f"⚠️ Lock screen monitor failed to start: {e}")
+                # ─────────────────────────────────────────────────────────────
+
             threading.Thread(target=announce_online, daemon=True, name="OnlineAnnouncer").start()
-            
-            # Proactive Sync
-            status = "ON" if self.agent is not None else "OFF"
-            self._update_hud("SYSTEM", f"Agentic Mode: {status}")
-            self._update_hud("IDLE", "Online")
 
         threading.Thread(target=_execute_boot_chain, daemon=True, name="BootChain").start()
 
@@ -367,7 +477,14 @@ class JarvisApp:
         
         # A. Wait for Input
         input_type, input_data = speech.wait_for_wake_or_text(api_queue)
-        
+
+        # ── LOCK SCREEN SAFETY NET ────────────────────────────────────────────
+        # If screen became locked between the loop guard and returning here
+        # (e.g. a stale Porcupine frame that was already buffered), discard it.
+        if getattr(speech, 'screen_locked', False):
+            return
+        # ─────────────────────────────────────────────────────────────────────
+
         # B. Handle Text Command (Socket/Typing)
         if input_type == "TEXT":
             self._handle_text_command(input_data, commander, brain)
@@ -376,17 +493,19 @@ class JarvisApp:
         # C. Handle Voice Command (Wake Word)
         elif input_type == "VOICE":
             logger.debug("🎤 Wake Detected")
-            
+
             # 1. Check Interrupt
             if speech.is_interrupted:
                 self._update_hud("IDLE", "Interrupted")
                 return
 
             # 2. FaceID Security Check
+            # Only run Face ID if Voice ID is disabled. Voice ID is faster and handles biometrics seamlessly.
+            voice_id_enabled = getattr(config, "ENABLE_VOICE_ID", False)
             face_id = ServiceRegistry.get("face_id")
-            if face_id:
+            
+            if face_id and not voice_id_enabled:
                 self._update_hud("SECURITY", "Verifying Face")
-                # display_status("🔒 VERIFYING FACE ID...", "bold yellow")
                 
                 if not face_id.verify_user(timeout=3):
                     self._update_hud("ACCESS DENIED", "Face ID Failed")
@@ -777,7 +896,14 @@ class JarvisApp:
         cmd_text = str(command).lower() if command is not None else ""
         # Cursor control requires main-thread execution for camera/OpenGL window lifecycle on macOS.
         if any(token in cmd_text for token in ("cursor control", "mouse control", "cur control")):
-            return commander.process(command, web_search=web_search)
+            result = commander.process(command, web_search=web_search)
+            # ── Camera teardown guard ────────────────────────────────────────
+            # cursor_control.py already sleeps 0.6 s in its finally block, but
+            # we add an extra 0.3 s here as a belt-and-suspenders safety margin
+            # to prevent FaceID's AVFoundation request from racing the macOS
+            # camera session teardown on the very next wake event.
+            time.sleep(0.3)
+            return result
 
         if speech is None:
             return commander.process(command, web_search=web_search)
@@ -965,26 +1091,51 @@ class JarvisApp:
             if key == "ENABLE_AGENTIC_MODE":
                 # Keep the live runtime config in sync with the persisted flag.
                 setattr(config, key, value)
-                self._toggle_agent(value)
-                # Still persist to file
-                self._update_atomic_config("ENABLE_AGENTIC_MODE", value)
+                # ⚡ Run toggle in background — AgentCore.__init__ loads fastembed/SemanticRouter
+                # which can take 2-3 minutes the first time. Running on main thread blocks
+                # wait_for_wake_or_text() and freezes Jarvis entirely.
+                def _do_toggle():
+                    self._toggle_agent(value)
+                    self._update_atomic_config("ENABLE_AGENTIC_MODE", value)
+                if value:
+                    self._update_hud("SYSTEM", "Activating Agentic Mode...")
+                else:
+                    self._update_hud("SYSTEM", "Deactivating Agentic Mode...")
+                threading.Thread(target=_do_toggle, daemon=True, name="AgentToggle").start()
 
             elif key == "FORCE_MAC_BUILTIN_AUDIO":
                 # Only write to disk here. The live mem-config and PyAudio hot-swap 
                 # are already executed instantly by socket_server.py asynchronously.
                 self._update_atomic_config("FORCE_MAC_BUILTIN_AUDIO", value)
 
+            elif key == "ENABLE_VOICE_ID":
+                # Live toggle Voice ID (Speaker Verification)
+                setattr(config, key, value)
+                self._update_atomic_config("ENABLE_VOICE_ID", value)
+                # Toggle the speech engine's voice_id module live
+                speech = ServiceRegistry.get("speech")
+                if speech and hasattr(speech, 'voice_id') and speech.voice_id:
+                    speech.voice_id.enabled = value
+                status = "ON" if value else "OFF"
+                self._update_hud("SYSTEM", f"Voice ID: {status}")
+                logger.info(f"🔒 Voice ID toggled: {status}")
+
         except Exception as e:
             logger.error(f"❌ Config Update Error: {e}")
 
     def _toggle_agent(self, enabled: bool, silent: bool = False):
-        """Unified logic to activate/deactivate Agentic Mode"""
+        """Unified logic to activate/deactivate Agentic Mode.
+        
+        NOTE: This method can be slow on first activation (fastembed model load).
+        Always call from a background thread via _process_internal_config_update.
+        """
         # NO EARLY EXIT: We always proceed to broadcast state to force-sync the UI
         old_agent = self.agent
+        t0 = time.time()
         
         if enabled:
             if old_agent is None:
-                logger.info("🤖 AGENTIC MODE ACTIVATED")
+                logger.info("🤖 AGENTIC MODE ACTIVATING...")
                 try:
                     from modules.agent_core import AgentCore
                     agent_cfg = config.AgentConfig(
@@ -996,6 +1147,8 @@ class JarvisApp:
                     agent_cfg.validate()
                     
                     self.agent = AgentCore(registry=ServiceRegistry, config=agent_cfg)
+                    elapsed = time.time() - t0
+                    logger.info(f"✅ AgentCore ready in {elapsed:.2f}s")
                     if not silent:
                         speech = ServiceRegistry.get("speech")
                         if speech:
@@ -1003,6 +1156,7 @@ class JarvisApp:
                 except Exception as e:
                     logger.error(f"❌ Failed to initialize Agentic Mode: {e}")
                     self._update_hud("ERROR", f"Agent Init Failed: {str(e)}")
+                    return
             
             # FORCE BROADCAST to sync UI
             self._update_hud("SYSTEM", "Agentic Mode: ON")
@@ -1023,7 +1177,9 @@ class JarvisApp:
 
     def _update_atomic_config(self, key: str, value):
         """Persists config change to config.py using atomic rename pattern"""
-        config_path = os.path.join(os.path.dirname(__file__), "config.py")
+        # Use abspath so this works correctly when launched from the Swift app
+        # bundle where __file__ may be a bare filename with no directory component.
+        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.py")
         tmp_path = config_path + ".tmp"
         
         try:
@@ -1057,7 +1213,7 @@ class JarvisApp:
         logger.info("🛑 Shutting down JarvisApp...")
         
         reminders = ServiceRegistry.get("reminders")
-        if reminders:
+        if reminders and hasattr(reminders, 'running'):
             reminders.stop_background_check()
         
         if hasattr(self, 'hotkey_listener'):

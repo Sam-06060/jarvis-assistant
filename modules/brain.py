@@ -71,11 +71,15 @@ class AIBrain:
             return self.ask_local_ollama(text, system_prompt=system_prompt, web_search=web_search)
 
         if self.cloud_available and getattr(config, 'CLOUD_FIRST_CONVERSATION', True):
-            cloud_response = self._ask_cloud(text, web_search=web_search, system_prompt=system_prompt)
-            if cloud_response:
-                return cloud_response
-            logger.warning("☁️ Cloud brain failed — falling back to local Ollama")
-        
+            # ── Circuit-breaker gate: skip cloud entirely when Groq is unhealthy ──
+            if self.groq and not self.groq.is_healthy():
+                logger.info("⚡ Groq circuit open — using Ollama directly (no retry waste)")
+            else:
+                cloud_response = self._ask_cloud(text, web_search=web_search, system_prompt=system_prompt)
+                if cloud_response:
+                    return cloud_response
+                logger.warning("☁️ Cloud brain failed — falling back to local Ollama")
+
         return self.ask_local_ollama(text, system_prompt=system_prompt, web_search=web_search)
 
     def _ask_cloud(self, user_input, web_search=False, system_prompt=None):

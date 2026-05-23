@@ -21,6 +21,7 @@ class SpeechEngine:
         self.wake_engine = None
         self.transcriber = None
         self.tts = None
+        self.voice_id = None  # Speaker Verification (Voice ID)
 
         def _init_recorder():
             from modules.audio.recorder import AudioRecorder
@@ -36,14 +37,29 @@ class SpeechEngine:
             self.tts = TextToSpeech(hud_queue=self.hud_queue)
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            futs = [pool.submit(f) for f in [_init_recorder, _init_wake, _init_transcriber, _init_tts]]
+
+        # Voice ID init (separate from audio-critical sub-systems)
+        def _init_voice_id():
+            if getattr(config, 'ENABLE_VOICE_ID', False):
+                try:
+                    from modules.audio.voice_id import VoiceID
+                    self.voice_id = VoiceID(
+                        threshold=getattr(config, 'VOICE_ID_THRESHOLD', 0.25),
+                    )
+                    logger.info("🔒 Voice ID initialized (model loading in background)")
+                except Exception as e:
+                    logger.warning(f"⚠️ Voice ID init failed: {e}")
+                    self.voice_id = None
+
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futs = [pool.submit(f) for f in [_init_recorder, _init_wake, _init_transcriber, _init_tts, _init_voice_id]]
             for f in as_completed(futs):
                 f.result() # Will raise if any sub-init fails
         
         # State
         self.is_interrupted = False
         self.wake_word_active = True
+        self.screen_locked = False  # ← Lock screen guard. When True, all audio input is blocked.
         self.last_listen_status = "idle"
         self.manual_sleep_requested = False
         
@@ -108,9 +124,29 @@ class SpeechEngine:
                     time.sleep(0.1)
                     continue
 
+                # ── LOCK SCREEN GUARD ──────────────────────────────────────────
+                # When screen is locked, the loop spins here doing nothing.
+                # Porcupine never processes audio → wake word CANNOT fire.
+                if self.screen_locked:
+                    time.sleep(0.5)
+                    continue
+                # ──────────────────────────────────────────────────────────────
+
                 # Read Frame
                 pcm = self.recorder.read_chunk()
                 if pcm and self.wake_engine.process(pcm):
+                    # ─── GATE 3: Speaker Verification (Voice ID) ──────────
+                    # After Porcupine fires, verify it was the enrolled speaker.
+                    # Uses the rolling buffer of recent audio (zero extra latency).
+                    if self.voice_id and self.voice_id.is_enrolled() and self.voice_id.enabled:
+                        audio_buffer = self.recorder.get_recent_audio(duration_seconds=2.0)
+                        if audio_buffer and len(audio_buffer) > 1024:  # Sanity check
+                            is_match, score = self.voice_id.verify(audio_buffer)
+                            if not is_match:
+                                logger.info(f"🔒 Voice ID REJECTED (score: {score:.3f})")
+                                continue  # Silently reject — don't activate
+                            logger.info(f"🔓 Voice ID VERIFIED (score: {score:.3f})")
+                    # ──────────────────────────────────────────────────────
                     self.wake_engine.play_wake_sound()
                     return ("VOICE", None)
 
@@ -123,7 +159,13 @@ class SpeechEngine:
     def listen_command(self, duration=5, use_vad=None):
         """
         Records and Transcribes audio.
+        Returns None immediately if the screen is locked.
         """
+        # ── LOCK SCREEN GUARD ──────────────────────────────────────────────
+        if self.screen_locked:
+            logger.debug("🔒 listen_command blocked — screen is locked.")
+            return None
+        # ──────────────────────────────────────────────────────────────────
         # Record
         if self.hud_queue: self.hud_queue.put(("LISTENING", "Listening..."))
         
@@ -251,6 +293,48 @@ class SpeechEngine:
         if hasattr(self.recorder, 'interrupt'):
             self.recorder.interrupt()
         self.wake_engine.play_interrupt_sound()
+
+    def lock(self):
+        """
+        Called when the Mac screen locks.
+        Fully silences Jarvis: blocks wake word, stops mic, stops TTS.
+        The wake word loop spins idle — Porcupine never sees audio.
+        """
+        logger.info("🔒 [Speech] Locking — mic and wake word disabled.")
+        # 1. Set flag FIRST so all guards kick in immediately
+        self.screen_locked = True
+        self.wake_word_active = False
+        # 2. Stop any in-progress TTS
+        try:
+            self.tts.stop()
+        except Exception:
+            pass
+        # 3. Interrupt the current mic read so the loop unblocks immediately
+        try:
+            if hasattr(self.recorder, 'interrupt'):
+                self.recorder.interrupt()
+        except Exception:
+            pass
+        # 4. Close the audio stream — mic hardware released
+        try:
+            self.recorder.close_stream()
+        except Exception:
+            pass
+
+    def unlock(self):
+        """
+        Called when the Mac screen unlocks.
+        Re-enables the wake word and reopens the mic stream.
+        """
+        logger.info("🔓 [Speech] Unlocking — mic and wake word restored.")
+        # 1. Clear flag FIRST
+        self.screen_locked = False
+        self.wake_word_active = True
+        # 2. Reopen mic stream (it was closed in lock())
+        try:
+            self.recorder.open_stream()
+        except Exception as e:
+            logger.debug(f"[Speech] Stream reopen on unlock: {e}")
 
     def stop(self):
         """Cleanly shut down the entire speech engine and release hardware interfaces."""
