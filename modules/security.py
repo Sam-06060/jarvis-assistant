@@ -81,6 +81,13 @@ class FaceID:
             pass
 
     def verify_user(self, timeout=5):
+        # If face encoding is still loading from background thread, wait for it.
+        # On first wake this prevents bypassing the animation entirely.
+        if self.known_face_encoding is None:
+            wait_start = time.time()
+            while self.known_face_encoding is None and (time.time() - wait_start) < 3.0:
+                time.sleep(0.05)
+        # If still None after waiting (no reference image / load failed), grant access silently.
         if self.known_face_encoding is None:
             return True
         overlay_process = None
@@ -101,8 +108,8 @@ class FaceID:
                     text=True,
                     bufsize=0 
                 )
-                # Short wait to let the animation start expanding
-                time.sleep(0.3) 
+                # Short wait to let the island expand animation begin
+                time.sleep(0.2)
         except Exception as e:
             print(f"⚠️ Could not launch FaceID UI: {e}")
 
@@ -168,19 +175,51 @@ class FaceID:
             if overlay_process and overlay_process.poll() is None:
                 try:
                     if access_granted:
-                        #
-                        # Send "success". Due to our Swift change, this triggers Rings -> Tick automatically.
+                        # Send "success" — triggers Rings -> Checkmark -> Retract animation in Swift UI.
+                        # The overlay will self-terminate after its closing animation completes.
                         if overlay_process.stdin:
                             overlay_process.stdin.write("success\n")
                             overlay_process.stdin.flush()
-                        
-                        # Wait 1.8s to let the full Ring -> Checkmark animation play out visibly
-                        # (Matches the new faster animation + 0.3s dwell)
-                        time.sleep(1.8)
+
+                        # ── PARALLEL WAKE ────────────────────────────────────────────────────────
+                        # Return immediately so Jarvis speaks "Yes sir" and activates the mic
+                        # WHILE the success animation is still playing on screen.
+                        # The overlay runs its ring -> checkmark -> island-retract sequence
+                        # independently and self-exits cleanly when done.
+                        # A background daemon thread provides a safety-timeout kill (4s)
+                        # in case the Swift process fails to self-terminate.
+                        def _cleanup_overlay_bg(proc, vid, bring_front_fn):
+                            try:
+                                proc.wait(timeout=4.0)  # Overlay self-exits after retract anim
+                            except Exception:
+                                try:
+                                    proc.terminate()
+                                except Exception:
+                                    pass
+                            finally:
+                                try:
+                                    vid.release()
+                                    import cv2 as _cv2
+                                    _cv2.destroyAllWindows()
+                                    _cv2.waitKey(1)
+                                except Exception:
+                                    pass
+                                bring_front_fn()
+
+                        threading.Thread(
+                            target=_cleanup_overlay_bg,
+                            args=(overlay_process, video_capture, self._bring_jarvis_to_front),
+                            daemon=True,
+                            name="FaceID-OverlayCleanup"
+                        ).start()
+                        # ─────────────────────────────────────────────────────────────────────────
+
+                        return True  # ← instant return; cleanup happens in background
+
                     else:
                         overlay_process.stdin.write("fail\n")
                         overlay_process.stdin.flush()
-                        time.sleep(1.0) # Wait for shake animation
+                        time.sleep(1.0)  # Wait for shake animation before returning denied
                     
                     # Ensure process is killed if it hasn't self-terminated
                     if overlay_process.poll() is None:
@@ -188,6 +227,7 @@ class FaceID:
                 except Exception as e:
                     print(f"UI Communication error: {e}")
             
+            # Failure-path cleanup (success path returns early above)
             video_capture.release()
             cv2.destroyAllWindows()
             cv2.waitKey(1)

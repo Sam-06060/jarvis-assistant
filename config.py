@@ -155,7 +155,7 @@ ENABLE_FACE_ID = True # <--- Master Toggle for Face ID Animation & Check
 REFERENCE_IMAGE_PATH = os.getenv("REFERENCE_IMAGE_PATH", os.path.join(DATA_DIR, "me.jpg"))
 
 # ============== VOICE ID (Speaker Verification) ==============
-ENABLE_VOICE_ID = True
+ENABLE_VOICE_ID = False
 VOICE_ID_THRESHOLD = 0.25       # Cosine similarity threshold (0.0–1.0, lower = stricter)
 VOICE_ID_MODEL_DIR = os.path.join(DATA_DIR, "models", "spkrec-ecapa-voxceleb")
 VOICE_ID_EMBEDDINGS_DIR = os.path.join(DATA_DIR, "voice_id")

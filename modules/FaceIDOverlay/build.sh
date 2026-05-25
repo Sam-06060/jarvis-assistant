@@ -19,6 +19,7 @@ swiftc -o FaceIDOverlay \
     -framework Cocoa \
     -framework QuartzCore \
     -framework CoreVideo \
+    -framework CoreImage \
     -O
 
 # Check if compilation succeeded

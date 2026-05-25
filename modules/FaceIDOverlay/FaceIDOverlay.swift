@@ -1,5 +1,6 @@
 import Cocoa
 import QuartzCore
+import CoreImage
 import Foundation
 
 class FaceIDWindow: NSWindow {
@@ -8,14 +9,15 @@ class FaceIDWindow: NSWindow {
 }
 
 // MARK: - Spring Physics Engine
+
 struct Spring {
     var value: CGFloat
     var target: CGFloat
     var velocity: CGFloat = 0
     
-    // Physics Configuration
-    let tension: CGFloat = 180
-    let friction: CGFloat = 16
+    // Critically-damped: ζ = friction / (2 * √tension) ≈ 1.0
+    let tension: CGFloat = 200
+    let friction: CGFloat = 28
     
     mutating func update(dt: CGFloat) -> Bool {
         let displacement = value - target
@@ -26,47 +28,67 @@ struct Spring {
     }
 }
 
+// MARK: - FaceIDOverlayView
+
 class FaceIDOverlayView: NSView {
 
     override var isFlipped: Bool { true }
 
-    enum State { case expanding, scanning, success, verified }
+    // ┌─────────────────────────────────────────────────────┐
+    // │  STATE MACHINE                                      │
+    // │  expanding → scanning → success → verified → retract│
+    // └─────────────────────────────────────────────────────┘
+    enum State { case expanding, scanning, success, verified, retracting }
     var state: State = .expanding
 
     let notchInfo = NotchDetector.detect()
 
-    // MARK: Layers
+    // ┌─────────────────────────────────────────────────────┐
+    // │  LAYER HIERARCHY                                    │
+    // │                                                     │
+    // │  root (clear)                                       │
+    // │  ├── islandLayer      (black rounded-rect island)   │
+    // │  └── contentLayer     (all visual content)          │
+    // │      ├── glowLayer        (green glow halo)         │
+    // │      ├── bracketLayer     (broken squircle brackets)│
+    // │      ├── featuresLayer    (face glyph)              │
+    // │      ├── spinContainer    (3D perspective host)     │
+    // │      │   └── ringLayer    (squircle → circle morph) │
+    // │      └── checkmarkLayer   (green checkmark)         │
+    // └─────────────────────────────────────────────────────┘
     let islandLayer = CAShapeLayer()
     let contentLayer = CALayer()
     let glowLayer = CALayer()
-    
-    let outerRing = CAShapeLayer()      // Brackets -> Hidden on success
-    let featuresLayer = CAShapeLayer()  // Face Glyph
-    let circleClipLayer = CALayer()     // Holds the 2 Ring Clusters
-    
-    // Verified Layers
-    let checkmarkLayer = CAShapeLayer()
-    let progressCircleLayer = CAShapeLayer()
 
-    // Animation / Physics
+    let bracketLayer = CAShapeLayer()
+    let featuresLayer = CAShapeLayer()
+
+    let spinContainer = CALayer()
+    let ringLayer = CAShapeLayer()
+    var ghostRings: [CAShapeLayer] = []   // Motion-trail afterimages
+    let ghostCount = 4                     // Clean trail without excess
+
+    let checkmarkLayer = CAShapeLayer()
+
+    var faceFrame: CGRect = .zero  // Stored for bracket animation
+
+    // MARK: Physics
     var displayLink: CVDisplayLink?
     var lastTime: CFTimeInterval = 0
-    
-    lazy var wSpring = Spring(value: notchInfo.width, target: notchInfo.width + 60)
-    lazy var hSpring = Spring(value: notchInfo.height, target: 220)
-    lazy var rSpring = Spring(value: 16, target: 48)
+
+    lazy var wSpring = Spring(value: notchInfo.width, target: notchInfo.width + 46)
+    lazy var hSpring = Spring(value: notchInfo.height, target: 175)
+    lazy var rSpring = Spring(value: 16, target: 44)
     lazy var alphaSpring = Spring(value: 0, target: 1)
 
-    // MARK: - COLORS (Neon Green)
+    // MARK: Colors & Constants
     let black = NSColor.black.cgColor
-    
-    // Vibrant Neon Green
-    let neonGreen = NSColor(displayP3Red: 0.7176, green: 0.9922, blue: 0.6824, alpha: 1.0).cgColor    
-    // Constants
+    let neonGreen = NSColor(displayP3Red: 0.7176, green: 0.9922, blue: 0.6824, alpha: 1.0).cgColor
     let faceLineWidth: CGFloat = 3.8
-    let heroRingWidth: CGFloat = 3.5
-    let ghostRingWidth: CGFloat = 4.2
-    
+    let ringLineWidth: CGFloat = 5.5
+
+    // MARK: - Init
+
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
@@ -77,37 +99,35 @@ class FaceIDOverlayView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    // MARK: Setup
+    // MARK: - Layer Setup
 
     func setup() {
+        // ── Island (black background shape) ──────────────────────────
         islandLayer.fillColor = black
         islandLayer.shadowOpacity = 0
         islandLayer.shadowRadius = 30
         islandLayer.shadowOffset = CGSize(width: 0, height: 4)
         layer?.addSublayer(islandLayer)
 
+        // ── Content container ────────────────────────────────────────
         layer?.addSublayer(contentLayer)
-        
-        var p = CATransform3DIdentity
-        p.m34 = -1 / 700
-        contentLayer.sublayerTransform = p
 
-        // Green Glow
+        // ── Green glow halo ──────────────────────────────────────────
         glowLayer.shadowColor = neonGreen
         glowLayer.shadowOpacity = 1
         glowLayer.shadowRadius = 36
         glowLayer.compositingFilter = "plusL"
         contentLayer.addSublayer(glowLayer)
 
-        // Green Outer Ring (Brackets)
-        outerRing.strokeColor = neonGreen
-        outerRing.fillColor = NSColor.clear.cgColor
-        outerRing.lineWidth = faceLineWidth
-        outerRing.lineCap = .round
-        outerRing.lineJoin = .round
-        contentLayer.addSublayer(outerRing)
+        // ── Broken squircle brackets (scanning phase) ────────────────
+        bracketLayer.strokeColor = neonGreen
+        bracketLayer.fillColor = NSColor.clear.cgColor
+        bracketLayer.lineWidth = ringLineWidth
+        bracketLayer.lineCap = .round
+        bracketLayer.lineJoin = .round
+        contentLayer.addSublayer(bracketLayer)
 
-        // Green Features
+        // ── Face glyph (scanning phase) ──────────────────────────────
         featuresLayer.strokeColor = neonGreen
         featuresLayer.fillColor = NSColor.clear.cgColor
         featuresLayer.lineWidth = faceLineWidth
@@ -115,44 +135,43 @@ class FaceIDOverlayView: NSView {
         featuresLayer.lineJoin = .round
         contentLayer.addSublayer(featuresLayer)
 
-        contentLayer.addSublayer(featuresLayer)
-
-        // ⭐️ FIX: Apply Perspective to the CLIP layer so children look 3D inside it
+        // ── Spin container with 3D perspective (spin phase) ──────────
+        // Only layers INSIDE this container get 3D depth.
+        // Checkmark stays outside = always flat.
         var perspective = CATransform3DIdentity
-        perspective.m34 = -1.0 / 500.0 // Stronger perspective for "Physical" feel
-        circleClipLayer.sublayerTransform = perspective
-        
-        circleClipLayer.masksToBounds = true
-        contentLayer.addSublayer(circleClipLayer)
+        perspective.m34 = -1.0 / 400.0
+        spinContainer.sublayerTransform = perspective
+        spinContainer.opacity = 0  // Hidden until morph
+        contentLayer.addSublayer(spinContainer)
 
-        // Verified Layer Setup
+        // ── Continuous ring (morphs squircle → circle) ───────────────
+        ringLayer.strokeColor = neonGreen
+        ringLayer.fillColor = NSColor.clear.cgColor
+        ringLayer.lineWidth = ringLineWidth
+        ringLayer.lineCap = .round
+        ringLayer.lineJoin = .round
+        spinContainer.addSublayer(ringLayer)
+
+        // ── Checkmark (verified phase) ───────────────────────────────
         checkmarkLayer.strokeColor = neonGreen
         checkmarkLayer.fillColor = NSColor.clear.cgColor
-        checkmarkLayer.lineWidth = faceLineWidth
+        checkmarkLayer.lineWidth = ringLineWidth
         checkmarkLayer.lineCap = .round
         checkmarkLayer.lineJoin = .round
         checkmarkLayer.strokeEnd = 0
+        checkmarkLayer.opacity = 0  // Hidden until verified
         contentLayer.addSublayer(checkmarkLayer)
-        
-        progressCircleLayer.strokeColor = neonGreen
-        progressCircleLayer.fillColor = NSColor.clear.cgColor
-        progressCircleLayer.lineWidth = faceLineWidth
-        progressCircleLayer.lineCap = .round
-        progressCircleLayer.strokeEnd = 0
-        // Rotate -90 degrees so it starts from top
-        progressCircleLayer.transform = CATransform3DMakeRotation(-CGFloat.pi / 2, 0, 0, 1)
-        contentLayer.addSublayer(progressCircleLayer)
 
         contentLayer.opacity = 0
         updateIslandGeometry()
     }
 
-    // MARK: Physics Loop
+    // MARK: - Expanding Phase (Spring Physics)
 
     func start() {
         lastTime = CACurrentMediaTime()
         CVDisplayLinkCreateWithActiveCGDisplays(&displayLink)
-        CVDisplayLinkSetOutputCallback(displayLink!, { _,_,_,_,_,ctx in
+        CVDisplayLinkSetOutputCallback(displayLink!, { _, _, _, _, _, ctx in
             let v = Unmanaged<FaceIDOverlayView>.fromOpaque(ctx!).takeUnretainedValue()
             DispatchQueue.main.async { v.tick() }
             return kCVReturnSuccess
@@ -165,45 +184,34 @@ class FaceIDOverlayView: NSView {
         let dt = CGFloat(min(now - lastTime, 0.05))
         lastTime = now
 
-        if state == .expanding {
-            let wDone = wSpring.update(dt: dt)
-            let hDone = hSpring.update(dt: dt)
-            let rDone = rSpring.update(dt: dt)
-            let aDone = alphaSpring.update(dt: dt)
-            
-            updateIslandGeometry()
-            
-            islandLayer.shadowOpacity = Float(alphaSpring.value) * 0.5
-            contentLayer.opacity = Float(alphaSpring.value)
+        guard state == .expanding else { return }
 
-            if wDone && hDone && rDone && aDone {
-                state = .scanning
-                // 🛑 STOP PHYSICS LOOP: We are now 100% Core Animation driven
-                CVDisplayLinkStop(displayLink!) 
-                startScan()
-            }
+        let wDone = wSpring.update(dt: dt)
+        let hDone = hSpring.update(dt: dt)
+        let rDone = rSpring.update(dt: dt)
+        let aDone = alphaSpring.update(dt: dt)
+
+        updateIslandGeometry()
+
+        islandLayer.shadowOpacity = Float(alphaSpring.value) * 0.5
+        contentLayer.opacity = Float(alphaSpring.value)
+
+        if wDone && hDone && rDone && aDone {
+            state = .scanning
+            CVDisplayLinkStop(displayLink!)
+            startScan()
         }
     }
-
-    // MARK: Geometry Update
 
     func updateIslandGeometry() {
         let w = wSpring.value
         let h = hSpring.value
         let r = rSpring.value
-        
         let cx = notchInfo.centerX
-        let top: CGFloat = 0
 
         islandLayer.path = NSBezierPath(
-            roundedRect: CGRect(
-                x: cx - w / 2,
-                y: top,
-                width: w,
-                height: h
-            ),
-            xRadius: r,
-            yRadius: r
+            roundedRect: CGRect(x: cx - w / 2, y: 0, width: w, height: h),
+            xRadius: r, yRadius: r
         ).cgPath
 
         CATransaction.begin()
@@ -213,462 +221,683 @@ class FaceIDOverlayView: NSView {
         CATransaction.commit()
     }
 
-    // MARK: Scanning Logic (Breathing Face)
+    // MARK: - Scanning Phase (Face Glyph + Brackets + Breathing)
 
     func startScan() {
         let size: CGFloat = 84
         let centerY = hSpring.value / 2
-        
-        buildFace(size: size, centerY: centerY)
+        let cx = wSpring.value / 2
+        let frame = CGRect(x: cx - size / 2, y: centerY - size / 2, width: size, height: size)
+        faceFrame = frame
 
-        let scaleAnim = CABasicAnimation(keyPath: "transform.scale")
-        scaleAnim.fromValue = 0.96
-        scaleAnim.toValue = 1.04
-        scaleAnim.duration = 1.3
-        scaleAnim.autoreverses = true
-        scaleAnim.repeatCount = .infinity
-        scaleAnim.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        contentLayer.add(scaleAnim, forKey: "breathingScale")
-        
-        let glowAnim = CABasicAnimation(keyPath: "shadowRadius")
-        glowAnim.fromValue = 20
-        glowAnim.toValue = 50
-        glowAnim.duration = 1.3
-        glowAnim.autoreverses = true
-        glowAnim.repeatCount = .infinity
-        glowAnim.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        glowLayer.add(glowAnim, forKey: "breathingGlow")
-        
+        buildBrackets(frame: frame)
+        buildFace(size: size, cx: cx, centerY: centerY)
+        prepareRingAndCheckmark(frame: frame)
+
+        // Breathing scale
+        let breathe = CABasicAnimation(keyPath: "transform.scale")
+        breathe.fromValue = 0.96
+        breathe.toValue = 1.04
+        breathe.duration = 1.3
+        breathe.autoreverses = true
+        breathe.repeatCount = .infinity
+        breathe.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        contentLayer.add(breathe, forKey: "breathingScale")
+
+        // Glow pulse
+        let glow = CABasicAnimation(keyPath: "shadowRadius")
+        glow.fromValue = 20
+        glow.toValue = 50
+        glow.duration = 1.3
+        glow.autoreverses = true
+        glow.repeatCount = .infinity
+        glow.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        glowLayer.add(glow, forKey: "breathingGlow")
+
         print("Ready. Type 'success' in terminal to unlock.")
     }
 
-    func buildFace(size: CGFloat, centerY: CGFloat) {
-        let cx = wSpring.value / 2
-        featuresLayer.frame = contentLayer.bounds
-        
-        let frame = CGRect(
-            x: cx - size / 2,
-            y: centerY - size / 2,
-            width: size,
-            height: size
-        )
-        
-        // 1. OUTER RING (Brackets)
-        let bracketPath = NSBezierPath()
-        let gap = size * 0.25
-        let cornerR = size * 0.28
+    func buildBrackets(frame: CGRect) {
+        bracketLayer.path = makeBracketPath(frame: frame, gapFraction: 0.25)
+        glowLayer.frame = frame
+    }
+
+    /// Builds a bracket path with configurable gap size.
+    /// gapFraction 0.25 = short brackets (scanning), 0.03 = nearly closed.
+    func makeBracketPath(frame: CGRect, gapFraction: CGFloat, cornerRFraction: CGFloat = 0.28) -> CGPath {
+        let size = frame.width
+        let gap = size * gapFraction
+        let cornerR = size * cornerRFraction
         let minX = frame.minX, maxX = frame.maxX
         let minY = frame.minY, maxY = frame.maxY
-        
-        // Top Left
-        bracketPath.move(to: CGPoint(x: minX, y: frame.midY - gap))
-        bracketPath.appendArc(from: CGPoint(x: minX, y: minY), to: CGPoint(x: frame.midX, y: minY), radius: cornerR)
-        bracketPath.line(to: CGPoint(x: frame.midX - gap, y: minY))
-        
-        // Top Right
-        bracketPath.move(to: CGPoint(x: frame.midX + gap, y: minY))
-        bracketPath.appendArc(from: CGPoint(x: maxX, y: minY), to: CGPoint(x: maxX, y: frame.midY), radius: cornerR)
-        bracketPath.line(to: CGPoint(x: maxX, y: frame.midY - gap))
-        
-        // Bottom Right
-        bracketPath.move(to: CGPoint(x: maxX, y: frame.midY + gap))
-        bracketPath.appendArc(from: CGPoint(x: maxX, y: maxY), to: CGPoint(x: frame.midX, y: maxY), radius: cornerR)
-        bracketPath.line(to: CGPoint(x: frame.midX + gap, y: maxY))
-        
-        // Bottom Left
-        bracketPath.move(to: CGPoint(x: frame.midX - gap, y: maxY))
-        bracketPath.appendArc(from: CGPoint(x: minX, y: maxY), to: CGPoint(x: minX, y: frame.midY), radius: cornerR)
-        bracketPath.line(to: CGPoint(x: minX, y: frame.midY + gap))
-        
-        outerRing.path = bracketPath.cgPath
-        glowLayer.frame = frame
-        circleClipLayer.frame = frame
-        circleClipLayer.cornerRadius = cornerR
 
-        // 2. FACE FEATURES
+        let path = NSBezierPath()
+
+        // Top-left bracket
+        path.move(to: CGPoint(x: minX, y: frame.midY - gap))
+        path.appendArc(from: CGPoint(x: minX, y: minY),
+                       to: CGPoint(x: frame.midX, y: minY), radius: cornerR)
+        path.line(to: CGPoint(x: frame.midX - gap, y: minY))
+
+        // Top-right bracket
+        path.move(to: CGPoint(x: frame.midX + gap, y: minY))
+        path.appendArc(from: CGPoint(x: maxX, y: minY),
+                       to: CGPoint(x: maxX, y: frame.midY), radius: cornerR)
+        path.line(to: CGPoint(x: maxX, y: frame.midY - gap))
+
+        // Bottom-right bracket
+        path.move(to: CGPoint(x: maxX, y: frame.midY + gap))
+        path.appendArc(from: CGPoint(x: maxX, y: maxY),
+                       to: CGPoint(x: frame.midX, y: maxY), radius: cornerR)
+        path.line(to: CGPoint(x: frame.midX + gap, y: maxY))
+
+        // Bottom-left bracket
+        path.move(to: CGPoint(x: frame.midX - gap, y: maxY))
+        path.appendArc(from: CGPoint(x: minX, y: maxY),
+                       to: CGPoint(x: minX, y: frame.midY), radius: cornerR)
+        path.line(to: CGPoint(x: minX, y: frame.midY + gap))
+
+        return path.cgPath
+    }
+
+    /// Builds 4 arc segments of a TRUE CIRCLE with tiny gaps.
+    /// Used as the morph TARGET so brackets smoothly transform into circle arcs.
+    /// CRITICAL: Must have IDENTICAL path structure to makeBracketPath
+    /// (same number of move/arc/line elements) for Core Animation to interpolate.
+    func makeCircleArcBracketPath(frame: CGRect, inset: CGFloat, gapAngle: CGFloat) -> CGPath {
+        // The ring lives at frame inset by the ring stroke width
+        let r = (frame.width - inset * 2) / 2
+        let cx = frame.midX
+        let cy = frame.midY
+
+        // Each bracket covers ~90° of the circle minus the gap.
+        // Angles in the macOS coordinate system (Y flipped): 0=right, π/2=down
+        // Gap angle in radians — small = nearly closed circle
+        let halfGap = gapAngle / 2
+
+        let path = NSBezierPath()
+
+        // Top-left arc (from ~180° down to ~270°, i.e. left+top quadrant)
+        let tlStart = CGFloat.pi + halfGap          // just past 180° (left)
+        let tlEnd   = CGFloat.pi * 1.5 - halfGap   // just before 270° (top)
+        path.move(to: CGPoint(x: cx + r * cos(tlStart), y: cy + r * sin(tlStart)))
+        path.appendArc(withCenter: CGPoint(x: cx, y: cy), radius: r,
+                       startAngle: tlStart * 180 / .pi,
+                       endAngle:   tlEnd   * 180 / .pi,
+                       clockwise: false)
+        // "line" to end (zero length — keeps path element count the same)
+        path.line(to: CGPoint(x: cx + r * cos(tlEnd), y: cy + r * sin(tlEnd)))
+
+        // Top-right arc (from ~270° to ~360°)
+        let trStart = CGFloat.pi * 1.5 + halfGap
+        let trEnd   = CGFloat.pi * 2.0 - halfGap
+        path.move(to: CGPoint(x: cx + r * cos(trStart), y: cy + r * sin(trStart)))
+        path.appendArc(withCenter: CGPoint(x: cx, y: cy), radius: r,
+                       startAngle: trStart * 180 / .pi,
+                       endAngle:   trEnd   * 180 / .pi,
+                       clockwise: false)
+        path.line(to: CGPoint(x: cx + r * cos(trEnd), y: cy + r * sin(trEnd)))
+
+        // Bottom-right arc (from ~0° to ~90°)
+        let brStart = halfGap
+        let brEnd   = CGFloat.pi * 0.5 - halfGap
+        path.move(to: CGPoint(x: cx + r * cos(brStart), y: cy + r * sin(brStart)))
+        path.appendArc(withCenter: CGPoint(x: cx, y: cy), radius: r,
+                       startAngle: brStart * 180 / .pi,
+                       endAngle:   brEnd   * 180 / .pi,
+                       clockwise: false)
+        path.line(to: CGPoint(x: cx + r * cos(brEnd), y: cy + r * sin(brEnd)))
+
+        // Bottom-left arc (from ~90° to ~180°)
+        let blStart = CGFloat.pi * 0.5 + halfGap
+        let blEnd   = CGFloat.pi - halfGap
+        path.move(to: CGPoint(x: cx + r * cos(blStart), y: cy + r * sin(blStart)))
+        path.appendArc(withCenter: CGPoint(x: cx, y: cy), radius: r,
+                       startAngle: blStart * 180 / .pi,
+                       endAngle:   blEnd   * 180 / .pi,
+                       clockwise: false)
+        path.line(to: CGPoint(x: cx + r * cos(blEnd), y: cy + r * sin(blEnd)))
+
+        return path.cgPath
+    }
+
+    func buildFace(size: CGFloat, cx: CGFloat, centerY: CGFloat) {
+        featuresLayer.frame = contentLayer.bounds
+
         let p = NSBezierPath()
+
+        // Eyes
         let eyeW = size * 0.105
         let eyeH = size * 0.16
         let eyeSpacing = size * 0.19
-        
-        let leftEyeRect = CGRect(x: cx - eyeSpacing - eyeW/2, y: centerY - eyeH * 0.55, width: eyeW, height: eyeH)
-        let rightEyeRect = CGRect(x: cx + eyeSpacing - eyeW/2, y: centerY - eyeH * 0.55, width: eyeW, height: eyeH)
-        
-        p.append(NSBezierPath(roundedRect: leftEyeRect, xRadius: eyeW/2, yRadius: eyeW/2))
-        p.append(NSBezierPath(roundedRect: rightEyeRect, xRadius: eyeW/2, yRadius: eyeW/2))
 
+        p.append(NSBezierPath(roundedRect: CGRect(
+            x: cx - eyeSpacing - eyeW / 2, y: centerY - eyeH * 0.55,
+            width: eyeW, height: eyeH), xRadius: eyeW / 2, yRadius: eyeW / 2))
+        p.append(NSBezierPath(roundedRect: CGRect(
+            x: cx + eyeSpacing - eyeW / 2, y: centerY - eyeH * 0.55,
+            width: eyeW, height: eyeH), xRadius: eyeW / 2, yRadius: eyeW / 2))
+
+        // Nose
         let noseTop = CGPoint(x: cx, y: centerY - size * 0.08)
         let noseCorner = CGPoint(x: cx, y: centerY + size * 0.12)
         let noseEnd = CGPoint(x: cx - size * 0.11, y: centerY + size * 0.12)
-        
         p.move(to: noseTop)
         p.line(to: noseCorner)
-        p.curve(
-            to: noseEnd,
-            controlPoint1: CGPoint(x: cx, y: centerY + size * 0.17),
-            controlPoint2: CGPoint(x: cx - size * 0.08, y: centerY + size * 0.17)
-        )
-        
+        p.curve(to: noseEnd,
+                controlPoint1: CGPoint(x: cx, y: centerY + size * 0.17),
+                controlPoint2: CGPoint(x: cx - size * 0.08, y: centerY + size * 0.17))
+
+        // Mouth
         let mouthY = centerY + size * 0.24
         let mouthW = size * 0.21
         p.move(to: CGPoint(x: cx - mouthW, y: mouthY))
-        p.curve(
-            to: CGPoint(x: cx + mouthW, y: mouthY),
-            controlPoint1: CGPoint(x: cx - mouthW * 0.5, y: mouthY + size * 0.14),
-            controlPoint2: CGPoint(x: cx + mouthW * 0.5, y: mouthY + size * 0.14)
-        )
-        
+        p.curve(to: CGPoint(x: cx + mouthW, y: mouthY),
+                controlPoint1: CGPoint(x: cx - mouthW * 0.5, y: mouthY + size * 0.14),
+                controlPoint2: CGPoint(x: cx + mouthW * 0.5, y: mouthY + size * 0.14))
+
         featuresLayer.path = p.cgPath
-        startIdleAnimation()
-    }
-    
-    func startIdleAnimation() {
+
+        // Subtle idle eye movement
         let lookX = CAKeyframeAnimation(keyPath: "transform.translation.x")
         lookX.values = [0, 2, -2, 0]
         lookX.keyTimes = [0, 0.3, 0.7, 1]
         lookX.duration = 5.0
         lookX.repeatCount = .infinity
-        lookX.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        
+
         let lookY = CAKeyframeAnimation(keyPath: "transform.translation.y")
         lookY.values = [0, -1.5, 1, 0]
         lookY.keyTimes = [0, 0.2, 0.8, 1]
         lookY.duration = 6.5
         lookY.repeatCount = .infinity
-        lookY.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        
+
         featuresLayer.add(lookX, forKey: "lookX")
         featuresLayer.add(lookY, forKey: "lookY")
     }
 
-    // MARK: TRIGGER (Pop + Activate Double Rings)
+    /// Pre-build ring, ghost trails, and checkmark geometry (invisible until success trigger)
+    func prepareRingAndCheckmark(frame: CGRect) {
+        let size = frame.width
+        let inset = ringLineWidth / 2
+        let localRect = CGRect(x: inset, y: inset,
+                               width: size - inset * 2, height: size - inset * 2)
+        let squircleR = size * 0.28
+        let squirclePath = NSBezierPath(
+            roundedRect: localRect,
+            xRadius: squircleR, yRadius: squircleR
+        ).cgPath
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+
+        // Position spin container at face area
+        spinContainer.frame = frame
+        spinContainer.opacity = 0
+
+        // ── Ghost trail rings ("drunk blur" afterimages) ─────────────
+        // Added BEFORE the hero ring so they render behind it.
+        // Each ghost is a translucent, slightly glowy copy that will
+        // run the same spin animation with a staggered time offset.
+        ghostRings.forEach { $0.removeFromSuperlayer() }
+        ghostRings.removeAll()
+
+        for i in 0..<ghostCount {
+            let ghost = CAShapeLayer()
+            ghost.frame = spinContainer.bounds
+            ghost.path = squirclePath
+            ghost.strokeColor = neonGreen
+            ghost.fillColor = NSColor.clear.cgColor
+            ghost.lineWidth = i < 1 ? ringLineWidth : ringLineWidth + CGFloat(i) * 2.0
+            ghost.lineCap = .round
+            ghost.lineJoin = .round
+
+            // Start invisible — ghosts only appear when spin begins
+            // (prevents artifacts during brackets→ring cross-fade)
+            let progress = CGFloat(i + 1) / CGFloat(ghostCount + 1)
+            ghost.opacity = 0
+
+            // ⭐️ SHADOW GLOW = THE BLUR
+            // Each ghost’s shadow acts as its soft blur halo.
+            // Progressive radius makes distant ghosts softer/wider.
+            ghost.shadowColor = neonGreen
+            ghost.shadowRadius = 7 + CGFloat(i) * 4  // 7, 11, 15, 19
+            ghost.shadowOpacity = Float(0.65 * (1.0 - progress))
+            ghost.shadowOffset = .zero
+
+            spinContainer.addSublayer(ghost)
+            ghostRings.append(ghost)
+        }
+
+        // ── Hero ring (on top of ghosts) ─────────────────────────────
+        ringLayer.frame = spinContainer.bounds
+        ringLayer.path = squirclePath
+        // Shadow starts off — revealed when spin begins
+        // (prevents glow artifacts during brackets→ring cross-fade)
+        ringLayer.shadowColor = neonGreen
+        ringLayer.shadowRadius = 7
+        ringLayer.shadowOpacity = 0
+        ringLayer.shadowOffset = .zero
+        // Re-add to ensure it's on top of the ghost stack
+        ringLayer.removeFromSuperlayer()
+        spinContainer.addSublayer(ringLayer)
+
+        // ── Checkmark geometry (centered in face area) ───────────────
+        checkmarkLayer.bounds = CGRect(x: 0, y: 0, width: size, height: size)
+        checkmarkLayer.position = CGPoint(x: frame.midX, y: frame.midY)
+        checkmarkLayer.opacity = 0
+        checkmarkLayer.strokeEnd = 0
+
+        let check = NSBezierPath()
+        check.move(to: CGPoint(x: size * 0.28, y: size * 0.50))
+        check.line(to: CGPoint(x: size * 0.44, y: size * 0.68))
+        check.line(to: CGPoint(x: size * 0.74, y: size * 0.32))
+        checkmarkLayer.path = check.cgPath
+
+        CATransaction.commit()
+    }
+
+    // MARK: - State Machine
 
     func advanceState() {
         switch state {
         case .scanning:
             triggerSuccessAnimation()
-        case .success:
-            triggerVerifiedAnimation()
         default:
             break
         }
     }
+
+    // MARK: - ⭐️ THE APPLE FACE ID SEQUENCE ⭐️
+    //
+    // Timeline (from success trigger):
+    //
+    //  T+0.00   Face features fade out
+    //  T+0.05   Brackets ↔ Ring cross-fade (ring starts as squircle)
+    //  T+0.12   Ring path morphs: squircle → perfect circle
+    //  T+0.15   3D spin + X/Y tumble begins (face topography scan)
+    //  T+0.60   Ring snaps flat (3D → 2D), spin stops
+    //  T+0.75   Green checkmark draws in (strokeEnd 0 → 1)
+    //  T+1.05   Brief dwell
+    //  T+1.27   Island retracts into notch
+    //  T+1.55   Process exits
 
     func triggerSuccessAnimation() {
         guard state == .scanning else { return }
         state = .success
 
         let size: CGFloat = 84
-        let centerY = hSpring.value / 2
-        let cx = wSpring.value / 2
-        let frame = CGRect(x: cx - size / 2, y: centerY - size / 2, width: size, height: size)
+        let inset = ringLineWidth / 2
+        let localRect = CGRect(x: inset, y: inset,
+                               width: size - inset * 2, height: size - inset * 2)
 
+        // Stop breathing
         contentLayer.removeAnimation(forKey: "breathingScale")
         glowLayer.removeAnimation(forKey: "breathingGlow")
 
-        // 1. POP OUT (Shrink)
-        let popOut = CABasicAnimation(keyPath: "transform.scale")
-        popOut.fromValue = 1.0
-        popOut.toValue = 0.01
-        popOut.duration = 0.2
-        popOut.timingFunction = CAMediaTimingFunction(controlPoints: 0.3, 0.0, 1.0, 1.0)
-        popOut.fillMode = .forwards
-        popOut.isRemovedOnCompletion = false
-        contentLayer.add(popOut, forKey: "popOut")
-        
-        // 2. THE SWAP
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            
-            self.featuresLayer.opacity = 0
-            self.outerRing.opacity = 0 // Hide bracket layer, we use ring clusters now
-            self.circleClipLayer.cornerRadius = size / 2
-            
-            // SPAWN INTERLEAVED CLUSTERS (Physics Fix)
-            // Creates a single unified system of interlaced rings
-            self.spawnInterleavedClusters(radius: size / 2)
-            
-            // POP IN (Spring)
-            let spring = CASpringAnimation(keyPath: "transform.scale")
-            spring.fromValue = 0.01
-            spring.toValue = 1.0
-            spring.mass = 0.6
-            spring.stiffness = 240
-            spring.damping = 14
-            spring.initialVelocity = 10
-            spring.duration = spring.settlingDuration
-            spring.fillMode = .forwards
-            spring.isRemovedOnCompletion = false
-            
-            self.contentLayer.add(spring, forKey: "popIn")
-            
-            // 3. AUTO-TRIGGER CHECKMARK (Chain Sequence)
-            // Wait 0.8s (Balanced "Apple" Timing)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                if self.state == .success {
-                    self.triggerVerifiedAnimation()
-                }
+        // ═══════════════════════════════════════════════════════════════
+        // STEP 1: Face features fade out (T+0.00, 0.15s)
+        // The face glyph dissolves smoothly before the ring appears.
+        // ═══════════════════════════════════════════════════════════════
+        let faceFade = CABasicAnimation(keyPath: "opacity")
+        faceFade.toValue = 0.0
+        faceFade.duration = 0.15
+        faceFade.timingFunction = CAMediaTimingFunction(name: .easeIn)
+        faceFade.fillMode = .forwards
+        faceFade.isRemovedOnCompletion = false
+        featuresLayer.add(faceFade, forKey: "faceFade")
+
+        // ═══════════════════════════════════════════════════════════════
+        // STEP 1.5: Brackets MORPH INTO CIRCLE ARCS (T+0.00, 0.18s)
+        // The brackets path-morph from squircle-corner arcs → 4 arc
+        // segments of the final circle, while shrinking to match the
+        // ring’s inset rect. Looks like the corners round off and
+        // contract into a circle shape before the ring cross-fades in.
+        // ═══════════════════════════════════════════════════════════════
+        // Morph target: nearly closed brackets with 85%-rounded corners
+        // cornerRFraction 0.42 = between squircle (0.28) and circle (0.50)
+        // — still has squircle character, not a perfect circle arc.
+        let circleArcTarget = makeBracketPath(
+            frame: faceFrame,
+            gapFraction: 0.03,
+            cornerRFraction: 0.42
+        )
+        let morph = CABasicAnimation(keyPath: "path")
+        morph.toValue = circleArcTarget
+        morph.duration = 0.18
+        morph.timingFunction = CAMediaTimingFunction(controlPoints: 0.4, 0.0, 0.2, 1.0)
+        morph.fillMode = .forwards
+        morph.isRemovedOnCompletion = false
+        bracketLayer.add(morph, forKey: "extendBrackets")
+
+        // ═══════════════════════════════════════════════════════════════
+        // STEP 2: Brackets ↔ Ring cross-fade (T+0.10, 0.10s)
+        // Pushed later so brackets are nearly closed before ring appears.
+        // ═══════════════════════════════════════════════════════════════
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
+            // Brackets fade out
+            let bracketsOut = CABasicAnimation(keyPath: "opacity")
+            bracketsOut.toValue = 0.0
+            bracketsOut.duration = 0.10
+            bracketsOut.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            bracketsOut.fillMode = .forwards
+            bracketsOut.isRemovedOnCompletion = false
+            self.bracketLayer.add(bracketsOut, forKey: "bracketsFade")
+
+            // Continuous ring fades in (same squircle shape — seamless)
+            let ringIn = CABasicAnimation(keyPath: "opacity")
+            ringIn.fromValue = 0.0
+            ringIn.toValue = 1.0
+            ringIn.duration = 0.10
+            ringIn.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            ringIn.fillMode = .forwards
+            ringIn.isRemovedOnCompletion = false
+            self.spinContainer.add(ringIn, forKey: "ringFadeIn")
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // STEP 3: Path morph — squircle → circle (T+0.12, 0.25s)
+        // Both paths built with NSBezierPath(roundedRect:) so they
+        // have identical segment counts → smooth Core Animation lerp.
+        // Morph applies to hero ring AND all ghost trails.
+        // ═══════════════════════════════════════════════════════════════
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            let circlePath = NSBezierPath(
+                roundedRect: localRect,
+                xRadius: localRect.width / 2,
+                yRadius: localRect.height / 2
+            ).cgPath
+
+            let morph = CABasicAnimation(keyPath: "path")
+            morph.toValue = circlePath
+            morph.duration = 0.25
+            morph.timingFunction = CAMediaTimingFunction(controlPoints: 0.32, 0.72, 0, 1)
+            morph.fillMode = .forwards
+            morph.isRemovedOnCompletion = false
+            self.ringLayer.add(morph, forKey: "morphToCircle")
+
+            // Morph ghost trails too
+            for ghost in self.ghostRings {
+                let ghostMorph = morph.copy() as! CABasicAnimation
+                ghost.add(ghostMorph, forKey: "morphToCircle")
             }
         }
-    }
-    
 
-    
-    // MARK: - THE "AXIS SHIFT" ANIMATION LOGIC (CHOREOGRAPHED SEQUENCE)
-    
-    func getAxisShiftAnimation(clockwise: Bool, delayOffset: Double) -> CAAnimationGroup {
-        
-        // TOTAL SEQUENCE DURATION (Matches the 0.8s wait time)
-        let totalDuration: Double = 0.8
-        
-        // ⭐️ APPLE PHYSICS EASING
-        // "Heavy Start, Effortless Glide"
-        // This is close to kCAMediaTimingFunctionEaseOut but sharper at the end.
-        let appleEase = CAMediaTimingFunction(controlPoints: 0.33, 0, 0, 1)
-        
-        // 1. CONSTANT SPIN (With Inertia)
+        // ═══════════════════════════════════════════════════════════════
+        // STEP 4: 3D spin + X/Y tumble (T+0.15)
+        // The ring spins and tilts through X/Y axes, simulating
+        // the ring wrapping around a 3D face topography.
+        // ═══════════════════════════════════════════════════════════════
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            self.startSpinAnimation()
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // STEP 5: Auto-trigger verified (T+0.60)
+        // After the spin completes, snap flat and draw checkmark.
+        // ═══════════════════════════════════════════════════════════════
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.60) {
+            self.triggerVerifiedAnimation()
+        }
+    }
+
+    // MARK: - 3D Spin (Face Topography Scan Effect)
+
+    func startSpinAnimation() {
+        // Duration matches the gap between spin start (T+0.15) and flatten (T+0.60)
+        let dur: CFTimeInterval = 0.45
+
+        // Time lag between each ghost — tight spacing for dense, smooth trail.
+        // 6 ghosts × 0.02s = 120ms total trail span (~7 frames at 60fps).
+        let lagPerGhost: CFTimeInterval = 0.02
+
+        // Z rotation — 1 full turn, decelerating
         let spin = CABasicAnimation(keyPath: "transform.rotation.z")
         spin.fromValue = 0
-        // Slower Spin (User Request: "2x slow" -> Half Speed)
-        // Was 0.019*pi, now 0.0095*pi (approx 1.7 degrees) in the same 2.0s.
-        spin.toValue = clockwise ? CGFloat.pi * 0.0095 : -CGFloat.pi * 0.0095
-        spin.duration = totalDuration
-        spin.timingFunction = appleEase // Apply Inertia
+        spin.toValue = CGFloat.pi * 2
+        spin.duration = dur
+        spin.timingFunction = CAMediaTimingFunction(controlPoints: 0.33, 0, 0, 1)
         spin.fillMode = .forwards
         spin.isRemovedOnCompletion = false
-        
-        // 2. DEEP X-TUMBLE (Tuned 66 Degrees)
-        let xRot = CAKeyframeAnimation(keyPath: "transform.rotation.x")
-        // Start 0 -> Tilt Down -> Tilt Up -> Tilt Down -> CONVERGE
-        xRot.values = [0, 1.15, -1.15, 1.15, 0, 0]
-        xRot.keyTimes = [0, 0.25, 0.55, 0.85, 0.98, 1]
-        xRot.duration = totalDuration
-        xRot.timingFunction = appleEase // Sync Tumble with Spin Inertia
-        xRot.fillMode = .forwards
-        xRot.isRemovedOnCompletion = false
 
-        // 3. DEEP Y-TUMBLE (Tuned 66 Degrees)
-        let yRot = CAKeyframeAnimation(keyPath: "transform.rotation.y")
-        // Start 0 -> Tilt Right -> Tilt Left -> Tilt Right -> CONVERGE
-        yRot.values = [0, -1.15, 1.15, -1.15, 0, 0]
-        yRot.keyTimes = [0, 0.20, 0.50, 0.80, 0.98, 1]
-        yRot.duration = totalDuration
-        yRot.timingFunction = appleEase // Sync Tumble with Spin Inertia
-        yRot.fillMode = .forwards
-        yRot.isRemovedOnCompletion = false
-        
-        let group = CAAnimationGroup()
-        group.animations = [spin, xRot, yRot]
-        group.duration = totalDuration
-        group.repeatCount = 0
-        group.isRemovedOnCompletion = false
-        group.fillMode = .forwards
-        
-        // ⭐️ TIME OFFSET FOR TRAIL
-        group.beginTime = CACurrentMediaTime() + delayOffset
-        
-        return group
-    }
+        // X tumble — "scanning face depth" (tilts forward/back)
+        let xTilt = CAKeyframeAnimation(keyPath: "transform.rotation.x")
+        xTilt.values = [0, 0.85, -0.85, 0.45, 0]
+        xTilt.keyTimes = [0, 0.25, 0.55, 0.82, 1.0]
+        xTilt.duration = dur
+        xTilt.calculationMode = .cubic
+        xTilt.fillMode = .forwards
+        xTilt.isRemovedOnCompletion = false
 
-    // MARK: Ring Cluster Spawner (INTERLEAVED)
+        // Y tumble — "scanning face width" (tilts left/right)
+        let yTilt = CAKeyframeAnimation(keyPath: "transform.rotation.y")
+        yTilt.values = [0, -0.75, 0.90, -0.35, 0]
+        yTilt.keyTimes = [0, 0.20, 0.50, 0.82, 1.0]
+        yTilt.duration = dur
+        yTilt.calculationMode = .cubic
+        yTilt.fillMode = .forwards
+        yTilt.isRemovedOnCompletion = false
 
-    func spawnInterleavedClusters(radius: CGFloat) {
-        
-        // ⭐️ APPLE ELEGANCE GEOMETRY
-        // Count 8: Clean, legible, distinct structure.
-        let count = 6 //make 8
-        // Trail 0.25: Balanced tail, perfectly proportional to the 8 rings.
-        let trailDuration: Double = 0.25 
-        let lagPerRing = trailDuration / Double(count)
+        // Apply to hero ring
+        ringLayer.add(spin, forKey: "spin")
+        ringLayer.add(xTilt, forKey: "xTilt")
+        ringLayer.add(yTilt, forKey: "yTilt")
 
-        // Create the Container for this Cluster
-        let clusterLayer = CALayer()
-        clusterLayer.frame = circleClipLayer.bounds
-        circleClipLayer.addSublayer(clusterLayer)
+        // Reveal hero shadow now that spin is starting
+        let shadowReveal = CABasicAnimation(keyPath: "shadowOpacity")
+        shadowReveal.fromValue = 0
+        shadowReveal.toValue = 0.55
+        shadowReveal.duration = 0.12
+        shadowReveal.fillMode = .forwards
+        shadowReveal.isRemovedOnCompletion = false
+        ringLayer.add(shadowReveal, forKey: "shadowReveal")
 
-        for i in 0..<count {
-            
-            // Loop twice per index: once for CW, once for CCW.
-            // This ensures Layer 0=CW, Layer 1=CCW, Layer 2=CW... mixed depth!
-            let directions = [true, false] 
-            
-            for clockwise in directions {
-                
-                let isHero = i == 0
-                
-                let axisLayer = CALayer()
-                axisLayer.frame = clusterLayer.bounds
+        // Reveal ghost trails with a quick fade-in
+        for (i, ghost) in ghostRings.enumerated() {
+            let progress = CGFloat(i + 1) / CGFloat(ghostCount + 1)
+            let targetOpacity = Float(0.45 * (1.0 - progress))
 
-                let ring = CAShapeLayer()
-                let path = NSBezierPath(ovalIn: axisLayer.bounds.insetBy(dx: 2, dy: 2)).cgPath
-                ring.path = path
-                
-                if isHero {
-                    // HERO RING: Sharp Core
-                    ring.lineWidth = heroRingWidth
-                    ring.strokeColor = neonGreen
-                    ring.opacity = 1.0
-                    ring.shadowColor = neonGreen
-                    ring.shadowOpacity = 0.2 //0.8
-                    ring.shadowRadius = 20 //8
-                } else {
-                    // ⭐️ APPLE "GLOW" GHOSTS
-                    // Not a smear, but a "Glow".
-                    // Radius 15 creates a soft, premium halo around the motion.
-                    ring.lineWidth = ghostRingWidth
-                    
-                    ring.shadowColor = neonGreen
-                    ring.shadowRadius = 15 //15 //5 //2(almost perfect)
-                    ring.shadowOpacity = 0.5 //1.0
-                    ring.shadowOffset = .zero
+            let fadeIn = CABasicAnimation(keyPath: "opacity")
+            fadeIn.fromValue = 0
+            fadeIn.toValue = targetOpacity
+            fadeIn.duration = 0.10
+            fadeIn.fillMode = .forwards
+            fadeIn.isRemovedOnCompletion = false
+            ghost.add(fadeIn, forKey: "ghostReveal")
+        }
 
-                    let progress = CGFloat(i) / CGFloat(count)
-                    let fade = 1.0 - progress
-                    
-                    // Translucent Glow Stroke
-                    ring.strokeColor = neonGreen
-                    ring.opacity = Float(0.4 * fade)
-                    
-                    // Keep Rasterization OFF
-                    ring.shouldRasterize = false
-                }
-                
-                ring.fillColor = NSColor.clear.cgColor
-                axisLayer.addSublayer(ring)
-                clusterLayer.addSublayer(axisLayer)
-                
-                let lag = -Double(i) * lagPerRing
-                let animGroup = getAxisShiftAnimation(clockwise: clockwise, delayOffset: lag)
-                axisLayer.add(animGroup, forKey: "gymbal")
-            }
+        // ── Apply to ghost trails with staggered time offsets ────────
+        // Each ghost gets the same animations but beginTime is delayed,
+        // so it trails behind the hero ring by a few frames.
+        let now = CACurrentMediaTime()
+        for (i, ghost) in ghostRings.enumerated() {
+            let lag = CFTimeInterval(i + 1) * lagPerGhost
+
+            let gSpin = spin.copy() as! CABasicAnimation
+            gSpin.beginTime = now + lag
+            gSpin.fillMode = .both
+
+            let gX = xTilt.copy() as! CAKeyframeAnimation
+            gX.beginTime = now + lag
+            gX.fillMode = .both
+
+            let gY = yTilt.copy() as! CAKeyframeAnimation
+            gY.beginTime = now + lag
+            gY.fillMode = .both
+
+            ghost.add(gSpin, forKey: "spin")
+            ghost.add(gX, forKey: "xTilt")
+            ghost.add(gY, forKey: "yTilt")
         }
     }
 
-    // MARK: - VERIFIED ANIMATION (Tick + Progress)
+    // MARK: - Verified Animation (Snap Flat + Draw Checkmark)
+    //
+    // The spinning 3D ring instantly stops and snaps flat,
+    // becoming a crisp 2D green circle outline.
+    // Then a green checkmark is drawn inside it.
 
     func triggerVerifiedAnimation() {
         guard state == .success else { return }
         state = .verified
-        
-        // 0. STOP RINGS (Freeze in place)
-        // Capture current state to avoid "snap" to default rotation
-        let pausedTime = circleClipLayer.convertTime(CACurrentMediaTime(), from: nil)
-        circleClipLayer.speed = 0.0
-        circleClipLayer.timeOffset = pausedTime
-        
-        // 1. POP OUT (Shrink + Fade Out)
-        let popOut = CABasicAnimation(keyPath: "transform.scale")
-        popOut.fromValue = 1.0
-        popOut.toValue = 0.01
-        // Elegant Snap (User Request: 0.05 was too fast, 0.2 too slow -> Now 0.15 balanced)
-        popOut.duration = 0.15 
-        popOut.timingFunction = CAMediaTimingFunction(controlPoints: 0.3, 0.0, 1.0, 1.0)
-        popOut.fillMode = .forwards
-        popOut.isRemovedOnCompletion = false
-        contentLayer.add(popOut, forKey: "popOutVerified")
-        
-        let fadeOut = CABasicAnimation(keyPath: "opacity")
-        fadeOut.fromValue = 1.0
-        fadeOut.toValue = 0.0
-        fadeOut.duration = 0.15
-        fadeOut.timingFunction = CAMediaTimingFunction(name: .easeIn)
-        fadeOut.fillMode = .forwards
-        fadeOut.isRemovedOnCompletion = false
-        contentLayer.add(fadeOut, forKey: "fadeOutVerified")
-        
-        // 2. THE SWAP & POP IN
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            
-            let size: CGFloat = 84
-            let centerY = self.hSpring.value / 2
-            let cx = self.wSpring.value / 2
-            
-            let bounds = CGRect(x: 0, y: 0, width: size, height: size)
-            let centerPos = CGPoint(x: cx, y: centerY)
 
-            // Disable implicit animations
+        // ═══════════════════════════════════════════════════════════════
+        // STEP 1: Snap ring flat — 3D → 2D
+        // Capture the current visual transform (all active rotations),
+        // remove the animations, set the model layer to the captured
+        // state, then spring-animate to identity.
+        // ═══════════════════════════════════════════════════════════════
+        let current = ringLayer.presentation()?.transform ?? CATransform3DIdentity
+
+        // Remove 3D rotation animations from hero ring
+        ringLayer.removeAnimation(forKey: "spin")
+        ringLayer.removeAnimation(forKey: "xTilt")
+        ringLayer.removeAnimation(forKey: "yTilt")
+
+        // Set model layer to captured visual state (prevents snap-back)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        ringLayer.transform = current
+        CATransaction.commit()
+
+        // Spring-animate to flat (identity transform)
+        let flatten = CABasicAnimation(keyPath: "transform")
+        flatten.fromValue = current
+        flatten.toValue = CATransform3DIdentity
+        flatten.duration = 0.20
+        flatten.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.2, 1.0)
+        flatten.fillMode = .forwards
+        flatten.isRemovedOnCompletion = false
+        ringLayer.add(flatten, forKey: "flatten")
+
+        // ── Fade out ghost trails (they dissolve as ring snaps flat) ─
+        for ghost in ghostRings {
+            ghost.removeAnimation(forKey: "spin")
+            ghost.removeAnimation(forKey: "xTilt")
+            ghost.removeAnimation(forKey: "yTilt")
+
+            let ghostFade = CABasicAnimation(keyPath: "opacity")
+            ghostFade.toValue = 0.0
+            ghostFade.duration = 0.15
+            ghostFade.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            ghostFade.fillMode = .forwards
+            ghostFade.isRemovedOnCompletion = false
+            ghost.add(ghostFade, forKey: "ghostFadeOut")
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // STEP 2: Draw green checkmark (T+0.15, 0.30s)
+        // Gentle strokeEnd animation — the checkmark "writes in"
+        // from the start of its path to the end.
+        // ═══════════════════════════════════════════════════════════════
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            // Show checkmark layer
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            
-            // 1. Hide Rings Instantly
-            self.circleClipLayer.opacity = 0
-            
-            // 2. Prepare Verified Geometry
-            self.checkmarkLayer.bounds = bounds
-            self.checkmarkLayer.position = centerPos
-            
-            self.progressCircleLayer.bounds = bounds
-            self.progressCircleLayer.position = centerPos
-            CATransaction.commit()
-            
-            // Build Paths
-            let checkPath = NSBezierPath()
-            checkPath.move(to: CGPoint(x: size * 0.28, y: size * 0.5))
-            checkPath.line(to: CGPoint(x: size * 0.45, y: size * 0.70))
-            checkPath.line(to: CGPoint(x: size * 0.75, y: size * 0.30))
-            self.checkmarkLayer.path = checkPath.cgPath
-            
-            let circlePath = NSBezierPath(ovalIn: CGRect(x: 0, y: 0, width: size, height: size))
-            self.progressCircleLayer.path = circlePath.cgPath
-            
-            // 3. POP IN (Spring + Fade In)
-            let spring = CASpringAnimation(keyPath: "transform.scale")
-            spring.fromValue = 0.01
-            spring.toValue = 1.0
-            spring.mass = 0.6
-            spring.stiffness = 240
-            spring.damping = 14
-            spring.initialVelocity = 10
-            spring.duration = spring.settlingDuration
-            spring.fillMode = .forwards
-            spring.isRemovedOnCompletion = false
-            self.contentLayer.add(spring, forKey: "popInVerified")
-            
-            let fadeIn = CABasicAnimation(keyPath: "opacity")
-            fadeIn.fromValue = 0.0
-            fadeIn.toValue = 1.0
-            fadeIn.duration = 0.15
-            fadeIn.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            fadeIn.fillMode = .forwards
-            fadeIn.isRemovedOnCompletion = false
-            self.contentLayer.add(fadeIn, forKey: "fadeInVerified")
-
-            // 4. Animate Progress Circle (Sequenced AFTER Pop In)
-            self.progressCircleLayer.strokeEnd = 0
-            
-            // Start when spring is mostly settled (0.3 factor for hyper speed)
-            let drawStartTime = CACurrentMediaTime() + spring.settlingDuration * 0.3
-            let circleDuration: TimeInterval = 0.15 // Blink speed
-            
-            let circleAnim = CABasicAnimation(keyPath: "strokeEnd")
-            circleAnim.fromValue = 0
-            circleAnim.toValue = 1
-            circleAnim.duration = circleDuration
-            circleAnim.beginTime = drawStartTime
-            circleAnim.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            circleAnim.fillMode = .both
-            circleAnim.isRemovedOnCompletion = false
-            self.progressCircleLayer.add(circleAnim, forKey: "circleDraw")
-            
-            // 5. Animate Checkmark
+            self.checkmarkLayer.opacity = 1
             self.checkmarkLayer.strokeEnd = 0
-            
-            let checkAnim = CABasicAnimation(keyPath: "strokeEnd")
-            checkAnim.fromValue = 0
-            checkAnim.toValue = 1
-            checkAnim.duration = 0.15 // Instant tick
-            // Start AFTER circle completes + 0.05s delay
-            checkAnim.beginTime = drawStartTime + circleDuration + 0.05
-            checkAnim.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.2, 1.0) // Bouncy/Snap tick
-            checkAnim.fillMode = .both
-            checkAnim.isRemovedOnCompletion = false
-            self.checkmarkLayer.add(checkAnim, forKey: "checkDraw")
-            
+            CATransaction.commit()
+
+            // Animate stroke drawing
+            let draw = CABasicAnimation(keyPath: "strokeEnd")
+            draw.fromValue = 0
+            draw.toValue = 1
+            draw.duration = 0.30
+            // Smooth ease — gentle start, clean finish
+            draw.timingFunction = CAMediaTimingFunction(controlPoints: 0.25, 0.1, 0.25, 1.0)
+            draw.fillMode = .forwards
+            draw.isRemovedOnCompletion = false
+            self.checkmarkLayer.add(draw, forKey: "drawCheck")
+
+            // ═══════════════════════════════════════════════════════════
+            // STEP 3: Chain retract after brief dwell (0.22s)
+            // ═══════════════════════════════════════════════════════════
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.30 + 0.22) {
+                self.triggerRetractAnimation()
+            }
+
             print("Verified.")
         }
     }
-}
 
-// MARK: App
+    // MARK: - Retract Animation (Island → Notch)
+
+    func triggerRetractAnimation() {
+        guard state == .verified else { return }
+        state = .retracting
+
+        let notch = notchInfo
+
+        // Content fades out
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.toValue = 0.0
+        fade.duration = 0.13
+        fade.timingFunction = CAMediaTimingFunction(name: .easeIn)
+        fade.fillMode = .forwards
+        fade.isRemovedOnCompletion = false
+        contentLayer.add(fade, forKey: "retractContentFade")
+
+        // Island collapses back to notch shape
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            let targetW = notch.width
+            let targetH = notch.height
+            let targetR: CGFloat = 16
+            let dur: CFTimeInterval = 0.28
+            // Apple "soft-settle" curve — smooth deceleration, no bounce
+            let curve = CAMediaTimingFunction(controlPoints: 0.42, 0, 0.58, 1)
+
+            CATransaction.begin()
+            CATransaction.setAnimationDuration(dur)
+            CATransaction.setAnimationTimingFunction(curve)
+            CATransaction.setCompletionBlock {
+                // Clean exit after animation settles
+                NSApplication.shared.terminate(nil)
+            }
+
+            // Path animation: island → notch
+            let targetPath = NSBezierPath(
+                roundedRect: CGRect(
+                    x: notch.centerX - targetW / 2, y: 0,
+                    width: targetW, height: targetH
+                ),
+                xRadius: targetR, yRadius: targetR
+            ).cgPath
+
+            let pathAnim = CABasicAnimation(keyPath: "path")
+            pathAnim.toValue = targetPath
+            pathAnim.duration = dur
+            pathAnim.timingFunction = curve
+            pathAnim.fillMode = .forwards
+            pathAnim.isRemovedOnCompletion = false
+            self.islandLayer.add(pathAnim, forKey: "retractPath")
+
+            // Shrink content bounds to match
+            let shrink = CABasicAnimation(keyPath: "bounds.size")
+            shrink.toValue = CGSize(width: targetW, height: targetH)
+            shrink.duration = dur
+            shrink.timingFunction = curve
+            shrink.fillMode = .forwards
+            shrink.isRemovedOnCompletion = false
+            self.contentLayer.add(shrink, forKey: "retractBounds")
+
+            // Island fades out at 30% through retract
+            let islandFade = CABasicAnimation(keyPath: "opacity")
+            islandFade.toValue = 0.0
+            islandFade.duration = dur
+            islandFade.beginTime = CACurrentMediaTime() + dur * 0.30
+            islandFade.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            islandFade.fillMode = .both
+            islandFade.isRemovedOnCompletion = false
+            self.islandLayer.add(islandFade, forKey: "islandFade")
+
+            self.islandLayer.shadowOpacity = 0
+
+            CATransaction.commit()
+        }
+    }
+
+} // End FaceIDOverlayView
+
+// MARK: - App
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var window: FaceIDWindow!
