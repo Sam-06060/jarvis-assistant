@@ -59,7 +59,7 @@ class TextToSpeech:
         # 2. Rate Adjustment
         rate = config.VOICE_RATE
         if self.voice_feedback_level == "verbose":
-            rate = 180
+            rate = 200
         elif self.voice_feedback_level == "brief":
             rate = 220
 

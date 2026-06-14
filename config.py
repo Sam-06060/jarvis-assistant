@@ -192,7 +192,7 @@ INTENT_ROUTER_GROQ_RETRY_WAIT = 10              # Seconds between retries
 
 # ============== NVIDIA CONFIG (Primary Code Generation) ==============
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
-NVIDIA_MODEL = "qwen/qwen2.5-coder-32b-instruct"
+NVIDIA_MODEL = "nvidia/llama-3.3-nemotron-super-49b-v1"  # Updated: qwen2.5-coder-32b EOL'd 2026-05-12
 NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 NVIDIA_MAX_TOKENS = 8192
 
@@ -215,7 +215,7 @@ AGENTIC_LLM_PROVIDER = os.getenv("AGENTIC_LLM_PROVIDER", "groq")
 AGENTIC_LLM_MODEL = os.getenv("AGENTIC_LLM_MODEL", "llama-3.3-70b-versatile")
 
 # ============== AGENTIC MODE (Modular/Toggleable) ==============
-ENABLE_AGENTIC_MODE = False
+ENABLE_AGENTIC_MODE = True
 ENABLE_PLANNER_SPLIT = False  # DISABLED: StatelessPlanner created plan-within-plan loops. AgentCore.TaskPlanner handles all agentic tasks directly.
 AGENTIC_MAX_ITERATIONS = 20  # Max steps in a single ReAct loop (hard capped by execution guards)
 AGENTIC_TIMEOUT_SECONDS = 300 # Per-step guards handle real limits; this is the outer boundTOOL_CALL_MAX_RETRIES = 3    # Bounds: 0-5 — each retry MUST use a different approach
