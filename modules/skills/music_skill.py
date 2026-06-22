@@ -54,7 +54,7 @@ class MusicSkill(Skill):
             if "next" in cmd or "skip" in cmd:
                 self.speech.speak(music_controller.next_track())
                 return True
-            elif "previous" in cmd or " go back" in cmd or "track back" in cmd:
+            elif "previous" in cmd or "go back" in cmd or "track back" in cmd:
                 self.speech.speak(music_controller.previous_track())
                 return True
             elif "pause" in cmd or "stop" in cmd:

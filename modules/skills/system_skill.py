@@ -427,7 +427,32 @@ class SystemSkill(Skill):
             return True
 
     def _adjust_brightness(self, direction):
-        if direction == "up":
-            return self._set_brightness(80)
-        else:
-            return self._set_brightness(30)
+        try:
+            import ctypes
+            ds = ctypes.cdll.LoadLibrary(
+                "/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices"
+            )
+            cg = ctypes.cdll.LoadLibrary(
+                "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"
+            )
+            cg.CGMainDisplayID.restype = ctypes.c_uint32
+            main_display = cg.CGMainDisplayID()
+            
+            # Fetch current brightness
+            ds.DisplayServicesGetBrightness.argtypes = [ctypes.c_uint32, ctypes.POINTER(ctypes.c_float)]
+            current_val = ctypes.c_float(0.0)
+            ds.DisplayServicesGetBrightness(main_display, ctypes.byref(current_val))
+            
+            current_pct = int(current_val.value * 100)
+            if direction == "up":
+                new_pct = min(100, current_pct + 10)
+            else:
+                new_pct = max(0, current_pct - 10)
+                
+            return self._set_brightness(new_pct)
+        except Exception:
+            # Fallback to absolute defaults if dynamic fetch fails
+            if direction == "up":
+                return self._set_brightness(80)
+            else:
+                return self._set_brightness(30)
